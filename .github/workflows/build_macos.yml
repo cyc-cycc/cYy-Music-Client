@@ -32,17 +32,23 @@ jobs:
 
     - name: Build with PyInstaller
       run: |
-        # --windowed 表示生成 GUI 应用，不显示命令行窗口
-        # --onefile 如果想生成单个可执行文件（.app 仍会是文件夹），但通常我们不使用 --onefile
         pyinstaller --windowed --name "MusicDownloader" musicdlgui.py
-
-    - name: Create DMG
+    
+    - name: Create DMG (using native hdiutil)
       run: |
-        brew install create-dmg
-        create-dmg --volname "MusicDownloader" --window-pos 200 120 --window-size 600 300 "dist/MusicDownloader.dmg" "dist/MusicDownloader.app"
-
-    - name: Upload artifact (app bundle)
+        # 1. 创建一个临时文件夹，用于存放即将打包进 DMG 的 .app
+        mkdir -p dmg_staging
+        cp -R "dist/MusicDownloader.app" dmg_staging/
+        
+        # 2. 使用 hdiutil 创建压缩的只读 DMG
+        # -volname: 挂载时显示的名称
+        # -srcfolder: 源文件夹
+        # -ov: 覆盖已有文件
+        # -format UDZO: 压缩的只读格式（标准分发格式）
+        hdiutil create -volname "MusicDownloader" -srcfolder dmg_staging -ov -format UDZO "dist/MusicDownloader.dmg"
+    
+    - name: Upload artifact (now upload the .dmg file!)
       uses: actions/upload-artifact@v4
       with:
         name: MusicDownloader-macOS
-        path: dist/MusicDownloader.app   # PyInstaller 生成的应用包路径
+        path: dist/MusicDownloader.dmg   # 重点：这里改成了 .dmg 文件！
