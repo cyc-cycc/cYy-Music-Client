@@ -36,6 +36,11 @@ jobs:
         # --onefile 如果想生成单个可执行文件（.app 仍会是文件夹），但通常我们不使用 --onefile
         pyinstaller --windowed --name "MusicDownloader" musicdlgui.py
 
+    - name: Create DMG
+      run: |
+        brew install create-dmg
+        create-dmg --volname "MusicDownloader" --window-pos 200 120 --window-size 600 300 "dist/MusicDownloader.dmg" "dist/MusicDownloader.app"
+
     - name: Upload artifact (app bundle)
       uses: actions/upload-artifact@v4
       with:
