@@ -30,9 +30,9 @@ jobs:
 
     - name: Build with PyInstaller
       run: |
-        pyinstaller --windowed --name "Music-spd-tool_macos-arm64" musicdlgui.py
+        pyinstaller --windowed --name "Music-spd-tool_macos-arm64" --icon icon.icns musicdlgui.py
     
-    - name: Create DMG (using native hdiutil)
+    - name: Create DMG
       run: |
         # 1. 创建一个临时文件夹，用于存放即将打包进 DMG 的 .app
         mkdir -p dmg_staging
