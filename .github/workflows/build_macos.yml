@@ -19,15 +19,9 @@ jobs:
     - name: Install VLC via cask
       run: |
         brew install --cask vlc
-
-    - name: Verify and set VLC_PREFIX
-      run: |
-        if [ -d "/Applications/VLC.app/Contents/MacOS" ]; then
-          echo "VLC_PREFIX=/Applications/VLC.app/Contents/MacOS" >> $GITHUB_ENV
-        else
-          echo "VLC installation not found!" && exit 1
-        fi
+        # （可选）打印 VLC 目录结构，方便调试
         ls -la /Applications/VLC.app/Contents/MacOS/
+        ls -la /Applications/VLC.app/Contents/ || true
 
     - name: Install Python dependencies
       run: |
