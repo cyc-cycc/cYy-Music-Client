@@ -14,11 +14,20 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.10'   # 稳定版本
+        python-version: '3.10'
 
-    - name: Install system dependencies (VLC)
+    - name: Install VLC via cask
       run: |
-        brew install vlc
+        brew install --cask vlc
+
+    - name: Verify and set VLC_PREFIX
+      run: |
+        if [ -d "/Applications/VLC.app/Contents/MacOS" ]; then
+          echo "VLC_PREFIX=/Applications/VLC.app/Contents/MacOS" >> $GITHUB_ENV
+        else
+          echo "VLC installation not found!" && exit 1
+        fi
+        ls -la /Applications/VLC.app/Contents/MacOS/
 
     - name: Install Python dependencies
       run: |
@@ -26,11 +35,8 @@ jobs:
         pip install -r requirements.txt
         pip install pyinstaller
 
-    - name: Build with PyInstaller using spec
+    - name: Build with PyInstaller
       run: |
-        # 获取 VLC 安装前缀，传递给 spec 文件
-        export VLC_PREFIX=$(brew --prefix vlc)
-        # 构建
         pyinstaller musicdlgui.spec
 
     - name: Create DMG
