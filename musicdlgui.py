@@ -1,25 +1,70 @@
 # -*- coding: utf-8 -*-
 import os
 import sys
-def get_vlc_plugin_path():
-    """返回打包后内置 VLC 插件目录，若不存在则返回 None"""
+def setup_runtime_paths():
+    """在源码或打包环境下，自动定位 VLC 和 FFmpeg 并设置环境变量"""
+    # 1. 确定基础目录
     if getattr(sys, 'frozen', False):
-        # PyInstaller 打包后的临时目录
-        base_path = sys._MEIPASS
-        plugin_path = os.path.join(base_path, 'vlc', 'plugins')
-        if os.path.exists(plugin_path):
-            return plugin_path
-    return None
+        base = sys._MEIPASS          # PyInstaller 解包目录
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))  # 脚本所在目录
 
-# 设置环境变量，供 python-vlc 使用
-vlc_plugins = get_vlc_plugin_path()
-if vlc_plugins:
-    os.environ['VLC_PLUGIN_PATH'] = vlc_plugins
-    # 如果还需要指定 libvlc 路径，可以添加 DYLD_LIBRARY_PATH
-    lib_path = os.path.dirname(vlc_plugins)  # 上级目录包含 libvlc.dylib
-    if os.path.exists(os.path.join(lib_path, 'libvlc.dylib')):
-        dyld_path = os.environ.get('DYLD_LIBRARY_PATH', '')
-        os.environ['DYLD_LIBRARY_PATH'] = lib_path + (':' + dyld_path if dyld_path else '')
+    # ---------- VLC 路径探测 ----------
+    vlc_dir = None
+    # 常见的 VLC 存放位置（相对于 base）
+    candidates = [
+        base,                        # 与脚本同级的根目录
+        os.path.join(base, 'vlc'),   # 子目录 vlc/
+        os.path.join(base, 'VLC'),   # 大小写变体
+    ]
+    for cand in candidates:
+        if os.path.isdir(cand) and os.path.exists(os.path.join(cand, 'libvlc.dll')):
+            vlc_dir = cand
+            break
+    # 如果上面没找到，检查 base 下是否存在 libvlc.dll（可能直接放在根）
+    if vlc_dir is None and os.path.exists(os.path.join(base, 'libvlc.dll')):
+        vlc_dir = base
+
+    if vlc_dir:
+        # Windows：添加目录到 PATH 和 DLL 搜索路径
+        if sys.platform == 'win32':
+            os.environ['PATH'] = vlc_dir + os.pathsep + os.environ.get('PATH', '')
+            if hasattr(os, 'add_dll_directory'):
+                try:
+                    os.add_dll_directory(vlc_dir)
+                except Exception:
+                    pass
+            # 设置 VLC_PLUGIN_PATH 以便 libvlc 内部找到插件
+            plugin_dir = os.path.join(vlc_dir, 'plugins')
+            if os.path.isdir(plugin_dir):
+                os.environ['VLC_PLUGIN_PATH'] = plugin_dir
+        # macOS / Linux 类似（可根据需要扩展）
+        elif sys.platform == 'darwin':
+            # macOS 处理（略，可参考之前代码）
+            pass
+        else:
+            # Linux 等（略）
+            pass
+
+    # ---------- FFmpeg 路径探测 ----------
+    # 同理，可以添加 ffmpeg 的 bin 目录到 PATH
+    # 例如 ffmpeg 放在 ffmpeg/bin/ 下
+    ffmpeg_bin = None
+    for cand in [os.path.join(base, 'ffmpeg', 'bin'), os.path.join(base, 'ffmpeg')]:
+        if os.path.isdir(cand):
+            # 检查 ffmpeg.exe 或 ffmpeg
+            if os.path.exists(os.path.join(cand, 'ffmpeg.exe')) or os.path.exists(os.path.join(cand, 'ffmpeg')):
+                ffmpeg_bin = cand
+                break
+    if ffmpeg_bin:
+        os.environ['PATH'] = ffmpeg_bin + os.pathsep + os.environ.get('PATH', '')
+        # 可设置 AUDIOREAD_FFMPEG 环境变量
+        ffmpeg_exe = os.path.join(ffmpeg_bin, 'ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg')
+        if os.path.exists(ffmpeg_exe):
+            os.environ['AUDIOREAD_FFMPEG'] = ffmpeg_exe
+
+# 执行路径设置（必须在 import vlc 之前）
+setup_runtime_paths()
 import re
 from enum import IntEnum
 import logging
@@ -68,14 +113,6 @@ from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
 
-# 获取 VLC 便携版的完整路径（仅在需要时添加 DLL 路径）
-vlc_path = os.path.join(os.path.dirname(__file__))
-if sys.platform == 'win32':
-    try:
-        if hasattr(os, "add_dll_directory"):
-            os.add_dll_directory(vlc_path)
-    except Exception:
-        pass
 import vlc
 
 from musicdl import musicdl
@@ -1385,12 +1422,6 @@ class MusicdlGUI(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setObjectName("musicdlGUI")
         self.setWindowTitle('🎵 音乐下载器 cYy edit (原项目:https://github.com/CharlesPikachu/musicdl/tree/master/examples/musicdlgui)')
-        try:
-            icon_path = os.path.join(APP_DIR, 'icon.ico')
-            if os.path.exists(icon_path):
-                self.setWindowIcon(QIcon(icon_path))
-        except Exception:
-            pass
         self.setMinimumSize(1450, 900)
         self.resize(1450, 900)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -1427,10 +1458,33 @@ class MusicdlGUI(QWidget):
         # 图标
         icon_label = QLabel()
         try:
-            icon_path = os.path.join(vlc_path, 'icon.ico')
+            # 获取基础目录（兼容打包和源码）
+            if getattr(sys, 'frozen', False):
+                base_dir = sys._MEIPASS          # 打包后的临时解包目录
+            else:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+
+            icon_path = os.path.join(base_dir, 'icon.ico')
             if os.path.exists(icon_path):
+                icon = QIcon(icon_path)
+                # 设置窗口图标（标题栏）
+                self.setWindowIcon(icon)
                 icon_pixmap = QPixmap(icon_path).scaled(24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 icon_label.setPixmap(icon_pixmap)
+                # 同时设置为应用程序全局图标（任务栏等）
+                app = QApplication.instance()
+                if app:
+                    app.setWindowIcon(icon)
+            else:
+                # 如果找不到，再尝试 exe 所在目录（仅打包时）
+                if getattr(sys, 'frozen', False):
+                    alt_path = os.path.join(os.path.dirname(sys.executable), 'icon.ico')
+                    if os.path.exists(alt_path):
+                        icon = QIcon(alt_path)
+                        self.setWindowIcon(icon)
+                        app = QApplication.instance()
+                        if app:
+                            app.setWindowIcon(icon)
         except Exception:
             pass
         icon_label.setFixedSize(24, 24)

@@ -3,42 +3,63 @@
 import os
 import subprocess
 
-APP_NAME = 'Music-spd-tool_macos-arm64'          # 最终 .app 的名称
-EXE_NAME = APP_NAME + '_bin'                    # 中间可执行文件的名称，避免冲突
-ICON_PATH = 'icon.icns'                         # 如果不存在，自动忽略
+APP_NAME = 'Music-spd-tool_macos-arm64'
+EXE_NAME = APP_NAME + '_bin'
+ICON_PATH = 'icon.icns'
 
-# ----- 硬编码 VLC 路径（GitHub Actions 实测路径） -----
+# ----- 查找 VLC -----
 VLC_LIB_DIR = '/Applications/VLC.app/Contents/MacOS/lib'
 VLC_PLUGINS_DIR = '/Applications/VLC.app/Contents/MacOS/plugins'
-
-# 如果上面路径不存在，尝试通过 brew 获取
 if not (os.path.exists(VLC_LIB_DIR) and os.path.exists(VLC_PLUGINS_DIR)):
     try:
         prefix = subprocess.check_output(['brew', '--prefix', 'vlc'], text=True).strip()
         if prefix:
             VLC_LIB_DIR = os.path.join(prefix, 'lib')
             VLC_PLUGINS_DIR = os.path.join(prefix, 'plugins')
-    except Exception:
+    except:
         pass
-
 if not (os.path.exists(VLC_LIB_DIR) and os.path.exists(VLC_PLUGINS_DIR)):
-    raise RuntimeError('VLC library or plugins not found.')
+    raise RuntimeError('VLC not found.')
 
 libvlc = os.path.join(VLC_LIB_DIR, 'libvlc.dylib')
 libvlccore = os.path.join(VLC_LIB_DIR, 'libvlccore.dylib')
 if not (os.path.exists(libvlc) and os.path.exists(libvlccore)):
-    raise RuntimeError('libvlc.dylib or libvlccore.dylib not found.')
+    raise RuntimeError('VLC libs missing.')
+
+# ----- 查找 ffmpeg -----
+def find_ffmpeg():
+    try:
+        prefix = subprocess.check_output(['brew', '--prefix', 'ffmpeg'], text=True).strip()
+        if prefix:
+            return prefix
+    except:
+        pass
+    for p in ['/usr/local/opt/ffmpeg', '/opt/homebrew/opt/ffmpeg']:
+        if os.path.exists(p):
+            return p
+    raise RuntimeError('ffmpeg not found.')
+
+FFMPEG_PREFIX = find_ffmpeg()
+ffmpeg_bin = os.path.join(FFMPEG_PREFIX, 'bin')
+ffmpeg_lib = os.path.join(FFMPEG_PREFIX, 'lib')
+if not os.path.exists(os.path.join(ffmpeg_bin, 'ffmpeg')):
+    raise RuntimeError('ffmpeg executable not found.')
+
+# ----- 构建 datas -----
+datas = [
+    (libvlc, 'vlc'),
+    (libvlccore, 'vlc'),
+    (VLC_PLUGINS_DIR, 'vlc/plugins'),
+    (ffmpeg_bin, 'ffmpeg/bin'),
+    (ffmpeg_lib, 'ffmpeg/lib'),
+]
 
 # ----- 分析 -----
 a = Analysis(
     ['musicdlgui.py'],
     pathex=[],
     binaries=[],
-    datas=[
-        (libvlc, 'vlc'),
-        (libvlccore, 'vlc'),
-        (VLC_PLUGINS_DIR, 'vlc/plugins'),
-    ],
+    datas=datas,
     hiddenimports=[
         'matplotlib.backends.backend_qt5agg',
         'numba',
@@ -66,14 +87,13 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 
-# ----- 生成可执行文件（使用 EXE_NAME，避免与 COLLECT 重名） -----
 exe = EXE(
     pyz,
     a.scripts,
     a.binaries,
     a.zipfiles,
     a.datas,
-    name=EXE_NAME,                             # 关键修改
+    name=EXE_NAME,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -89,7 +109,6 @@ exe = EXE(
     icon=ICON_PATH if os.path.exists(ICON_PATH) else None,
 )
 
-# ----- 收集所有文件到 dist/APP_NAME 目录（名称与 .app 保持一致） -----
 coll = COLLECT(
     exe,
     a.binaries,
@@ -98,10 +117,9 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name=APP_NAME,                             # 收集目录名，与 .app 同名
+    name=APP_NAME,
 )
 
-# ----- 生成 .app 应用包 -----
 app = BUNDLE(
     coll,
     name=APP_NAME + '.app',
