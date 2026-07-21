@@ -67,7 +67,7 @@ else:
 
 # ----- 分析 -----
 a = Analysis(
-    ['musicdlgui.py'],
+    ['cYy-Music-Client.py'],
     pathex=[],
     binaries=[],
     datas=datas,
