@@ -3,7 +3,7 @@
 import os
 import subprocess
 
-APP_NAME = 'Music-spd-tool_macos-arm64'
+APP_NAME = 'cYy-Music-Client_macos-arm64'
 EXE_NAME = APP_NAME + '_bin'
 ICON_PATH = 'icon.icns'
 
@@ -137,10 +137,10 @@ app = BUNDLE(
     icon=ICON_PATH if os.path.exists(ICON_PATH) else None,
     bundle_identifier='com.yourcompany.musicdlgui',
     info_plist={
-        'CFBundleShortVersionString': '4.0.0',
-        'CFBundleVersion': '4.0.0',
-        'CFBundleName': 'Music Downloader',
-        'CFBundleDisplayName': 'Music Downloader',
+        'CFBundleShortVersionString': '4.1.0',
+        'CFBundleVersion': '4.1.0',
+        'CFBundleName': 'cYy Music Client',
+        'CFBundleDisplayName': 'cYy Music Client',
         'NSHighResolutionCapable': True,
         'LSMinimumSystemVersion': '10.13',
     },
