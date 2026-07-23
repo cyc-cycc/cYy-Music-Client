@@ -377,9 +377,9 @@ class PlayerWrapper(QObject):
         self._current_media = self._instance.media_new(url)
         self._current_media.add_option(':network-caching=3000')
         if headers:
-            header_items = [f'{k}={v}' for k, v in headers.items() if v is not None]
-            if header_items:
-                self._current_media.add_option(f':http-header={":".join(header_items)}')
+            for k, v in headers.items():
+                if v is not None:
+                    self._current_media.add_option(f'--http-header={k}={v}')
         self._player.set_media(self._current_media)
         self._duration = 0
         self.durationChanged.emit(0)
@@ -483,18 +483,21 @@ class CoverRunnable(QRunnable):
 
 # ==================== 搜索线程 ====================
 class SearchThread(QThread):
-    source_started = pyqtSignal(str)
-    source_finished = pyqtSignal(str, list)
-    finished = pyqtSignal()
-    error = pyqtSignal(str)
+    # 信号都带上 task_id
+    source_started = pyqtSignal(int, str)          # task_id, source
+    source_finished = pyqtSignal(int, str, list)  # task_id, source, results
+    finished = pyqtSignal(int)                    # task_id
+    error = pyqtSignal(int, str)                  # task_id, error
 
     def __init__(self, music_client: musicdl.MusicClient, sources: List[str],
-                 keyword: str, limit_per_source: int, threadings_per_source: int = 5):
+                 keyword: str, limit_per_source: int, task_id: int,
+                 threadings_per_source: int = 5):
         super().__init__()
         self.music_client = music_client
         self.sources = sources
         self.keyword = keyword
         self.limit_per_source = limit_per_source
+        self.task_id = task_id
         self.threadings_per_source = threadings_per_source
         self._stop_event = threading.Event()
         self._executor = None
@@ -514,7 +517,7 @@ class SearchThread(QThread):
             for source in self.sources:
                 if self._stop_event.is_set():
                     break
-                self.source_started.emit(source)
+                self.source_started.emit(self.task_id, source)
                 fut = self._executor.submit(
                     self._search_single_source, source, self.keyword,
                     self.limit_per_source, self.threadings_per_source
@@ -529,17 +532,17 @@ class SearchThread(QThread):
                     results = fut.result()
                     if results is None:
                         results = []
-                    self.source_finished.emit(source, results)
+                    self.source_finished.emit(self.task_id, source, results)
                 except Exception as e:
-                    self.error.emit(f"{source} 搜索失败: {str(e)}")
+                    self.error.emit(self.task_id, f"{source} 搜索失败: {str(e)}")
         except Exception as e:
-            self.error.emit(str(e))
+            self.error.emit(self.task_id, str(e))
         finally:
             try:
                 self._executor.shutdown(wait=False)
             except Exception:
                 pass
-            self.finished.emit()
+            self.finished.emit(self.task_id)
 
     def _search_single_source(self, source: str, keyword: str, limit: int,
                               num_threadings: int) -> Optional[List]:
@@ -557,15 +560,17 @@ class SearchThread(QThread):
 
 # ==================== 歌单解析线程 ====================
 class PlaylistParseThread(QThread):
-    parse_started = pyqtSignal()
-    parse_finished = pyqtSignal(list, str)
-    parse_error = pyqtSignal(str)
+    # 所有信号带上 task_id
+    parse_started = pyqtSignal(int)                 # task_id
+    parse_finished = pyqtSignal(int, list, str)     # task_id, song_infos, source_display
+    parse_error = pyqtSignal(int, str)              # task_id, error_msg
 
-    def __init__(self, playlist_url: str, source_internal: str, source_display: str):
+    def __init__(self, playlist_url: str, source_internal: str, source_display: str, task_id: int):
         super().__init__()
         self.playlist_url = playlist_url
         self.source_internal = source_internal
         self.source_display = source_display
+        self.task_id = task_id
         self._stop = False
 
     def stop(self):
@@ -573,7 +578,7 @@ class PlaylistParseThread(QThread):
 
     def run(self):
         try:
-            self.parse_started.emit()
+            self.parse_started.emit(self.task_id)
             init_cfg = {self.source_internal: {'search_size_per_source': 50}}
             client = musicdl.MusicClient(
                 music_sources=[self.source_internal],
@@ -585,7 +590,7 @@ class PlaylistParseThread(QThread):
             if self._stop:
                 return
             if not song_infos:
-                self.parse_error.emit("歌单解析结果为空")
+                self.parse_error.emit(self.task_id, "歌单解析结果为空")
                 return
             valid = []
             for info in song_infos:
@@ -600,12 +605,15 @@ class PlaylistParseThread(QThread):
                         continue
                 valid.append(info)
             if not valid:
-                self.parse_error.emit("所有歌曲均无有效下载链接")
+                self.parse_error.emit(self.task_id, "所有歌曲均无有效下载链接")
                 return
-            self.parse_finished.emit(valid, self.source_display)
+            self.parse_finished.emit(self.task_id, valid, self.source_display)
         except Exception as e:
             logger.error(f"歌单解析线程异常: {e}", exc_info=True)
-            self.parse_error.emit(str(e))
+            self.parse_error.emit(self.task_id, str(e))
+        finally:
+            # 不再调用 self.deleteLater()，由主窗口负责删除
+            pass
 
 # ==================== 下载线程 ====================
 class DownloadThread(QThread):
@@ -1333,9 +1341,9 @@ class AudioVisualizer(QMainWindow):
     def _playback_finished(self):
         if self.stream:
             self.stream.stop()
-        self.pause_btn.setEnabled(False)
-        self.pause_btn.setText("⏸ 暂停")
-        self.progress_slider.setValue(100)
+        self.pause_btn.setText("⏯️ 继续")
+        self.paused = True
+        self.progress_slider.setValue(0)
         self.time_label.setText(f"{self._format_time(self.total_time)} / {self._format_time(self.total_time)}")
 
     def _toggle_pause(self):
@@ -1343,7 +1351,7 @@ class AudioVisualizer(QMainWindow):
             return
         with self.lock:
             self.paused = not self.paused
-        self.pause_btn.setText("▶ 继续" if self.paused else "⏸ 暂停")
+        self.pause_btn.setText("⏯️ 继续" if self.paused else "⏸ 暂停")
         if not self.paused and self.stream and not self.stream.active:
             self.stream.start()
 
@@ -1356,7 +1364,7 @@ class AudioVisualizer(QMainWindow):
         self.is_dragging = True
         with self.lock:
             self.paused = True
-        self.pause_btn.setText("▶ 继续")
+        self.pause_btn.setText("⏯️ 继续")
 
     def _progress_release(self):
         if self.audio_data is None:
@@ -1598,7 +1606,7 @@ class MarqueeLabel(QLabel):
         # 获取当前可用宽度（考虑边距）
         fm = self.fontMetrics()
         text_width = fm.horizontalAdvance(self._full_text)
-        label_width = self.width() - 10  # 留边距
+        label_width = self.width() - 10
         if label_width <= 0:
             label_width = self.width()
         if text_width <= label_width:
@@ -1609,18 +1617,10 @@ class MarqueeLabel(QLabel):
             return
         # 文本超宽，启用滚动
         self._scroll_enabled = True
-        # 截取从 offset 开始的足够显示的部分
         if self._offset >= len(self._full_text):
             self._offset = 0
-        # 寻找最接近显示宽度的截断点
         available = label_width
-        # 简单方法：从 offset 开始，逐个字符增加直到宽度超过可用宽度
         chars = list(self._full_text)
-        # 为了视觉效果，在末尾添加空格填充，或者显示 " ..."
-        # 我们采用循环滚动：显示从 offset 开始的一段，末尾补空格，但为了美观，加上 " ..."
-        # 更好：显示一段，然后末尾显示 " ..." 但会占用空间，我们直接滚动显示原文本
-        # 方法：取从 offset 开始的足够字符，但可能显示不全，但滚动会不断变化
-        # 简便：取从 offset 开始的字符串，如果长度超过可用，则截断
         end = self._offset
         while True:
             test_text = self._full_text[self._offset:end+1]
@@ -1698,11 +1698,13 @@ class MusicdlGUI(QWidget):
         self._resize_start_pos = QPoint()
         self._resize_start_geo = QRect()
 
+        self._download_cancelled = False
+
         self.settings = {
             'sources': [
-                    'QQ音乐(高质量无损,推荐)'
+                    '酷我音乐(普通无损,推荐)'
                 ],
-            'limit': 5,
+            'limit': 10,
             'dedup': False,
             'save_dir': DEFAULT_SAVE_DIR,
             'filename_format': '歌手-歌曲名',
@@ -1819,7 +1821,7 @@ class MusicdlGUI(QWidget):
         self.combo_playlist_source = QComboBox()
         self.combo_playlist_source.addItems(list(PLAYLIST_SOURCE_MAP.keys()))
         playlist_layout.addWidget(self.combo_playlist_source)
-        self.button_parse_playlist = QPushButton("📋 解析歌单")
+        self.button_parse_playlist = QPushButton("📋 解析歌单(较慢！)")
         self.button_parse_playlist.setObjectName("parsePlaylistButton")
         playlist_layout.addWidget(self.button_parse_playlist)
         content_layout.addLayout(playlist_layout)
@@ -2214,6 +2216,11 @@ class MusicdlGUI(QWidget):
         self.dragging = False
         self._vis_download_thread = None
 
+        self.search_task_counter = 0          # 全局递增ID
+        self.current_search_task_id = 0       # 当前有效的任务ID
+        self.parse_task_counter = 0           # 全局递增ID
+        self.current_parse_task_id = 0        # 当前有效的解析任务ID
+
     def _init_player(self):
         self.player = PlayerWrapper()
         self.player.setVolume(self.slider_volume.value())
@@ -2244,7 +2251,7 @@ class MusicdlGUI(QWidget):
         QMessageBox.about(self, "关于", 
             "🎵 cYy Music Client\n"
             "基于 PyQt5 + musicdl\n"
-            "版本 4.1.0\n"
+            "版本 4.1.1\n"
             "本程序遵循 GNU 3.0 开源协议\n"
             "© 2026 cYy"
         )
@@ -2262,6 +2269,7 @@ class MusicdlGUI(QWidget):
             self.stop_search()
 
     def start_search(self):
+        # 检查设置等原有代码不变 ...
         selected_display = self.settings.get('sources', [])
         if not selected_display:
             QMessageBox.warning(self, '警告', '请先在设置中选择搜索源')
@@ -2283,7 +2291,7 @@ class MusicdlGUI(QWidget):
         limit = self.settings.get('limit', 5)
         dedup = self.settings.get('dedup', False)
 
-        self.clear_results()
+        self.clear_results()   # 清空表格，旧结果不再显示
 
         init_cfg = {}
         for src in selected_sources:
@@ -2298,6 +2306,10 @@ class MusicdlGUI(QWidget):
             QMessageBox.critical(self, '初始化失败', f'无法创建音乐客户端：{str(e)}')
             return
 
+        # 生成新的任务ID
+        self.search_task_counter += 1
+        self.current_search_task_id = self.search_task_counter
+
         self.label_stats.setText(f'⏳ 搜索中 (0/{len(selected_sources)}) ...')
         self._source_counts = {src: -1 for src in selected_sources}
 
@@ -2306,13 +2318,16 @@ class MusicdlGUI(QWidget):
         self.btn_search_title.setToolTip('停止搜索')
         self.search_in_progress = True
 
+        # 创建新线程，传入 task_id
         self.search_thread = SearchThread(
             self.music_client,
             selected_sources,
             keyword,
             limit,
+            task_id=self.current_search_task_id,
             threadings_per_source=5,
         )
+        # 连接信号（槽函数需增加 task_id 参数）
         self.search_thread.source_started.connect(self.on_source_started)
         self.search_thread.source_finished.connect(self.on_source_finished)
         self.search_thread.finished.connect(self.on_search_finished)
@@ -2320,28 +2335,78 @@ class MusicdlGUI(QWidget):
         self.search_thread.start()
 
     def stop_search(self):
-        if self.search_thread and self.search_thread.isRunning():
-            self.search_thread.stop()
-            self.btn_search_title.setEnabled(False)
-            self.btn_search_title.setText('⏹')
-            self.label_stats.setText('⏹ 正在停止搜索...')
-            try:
-                self.search_thread.finished.disconnect(self.on_search_finished)
-            except TypeError:
-                pass
-            self._restore_search_ui()
+        if self.search_in_progress:
+            if self.search_thread and self.search_thread.isRunning():
+                self.search_thread.stop()
+                # 断开所有UI信号
+                for sig in ['source_started', 'source_finished', 'error']:
+                    try:
+                        getattr(self.search_thread, sig).disconnect()
+                    except TypeError:
+                        pass
+                # 先断开所有 finished 连接（避免重复）
+                try:
+                    self.search_thread.finished.disconnect()
+                except TypeError:
+                    pass
+                # 连接清理槽
+                self.search_thread.finished.connect(self._on_search_thread_finished_cleanup)
+            # 恢复UI
+            self.search_in_progress = False
+            self._set_ui_enabled(True)
+            self.btn_search_title.setEnabled(True)
+            self.btn_search_title.setText('🔍')
+            self.btn_search_title.setToolTip('搜索')
+            self.label_stats.setText('⏹ 已停止搜索')
         else:
             self.finish_search()
 
-    def _restore_search_ui(self):
+    def _on_search_thread_finished_cleanup(self):
+        """搜索线程结束后的清理（由用户停止触发）"""
+        # 防止重复执行
+        if self.search_thread is None:
+            return
+        # 断开此信号连接（防止重复触发）
+        try:
+            self.search_thread.finished.disconnect(self._on_search_thread_finished_cleanup)
+        except TypeError:
+            pass
+        if self.search_thread and self.search_thread.isRunning():
+            self.search_thread.wait()
+        if self.search_thread:
+            self.search_thread.deleteLater()
+            self.search_thread = None
+        # 恢复UI
         self.search_in_progress = False
         self._set_ui_enabled(True)
         self.btn_search_title.setEnabled(True)
         self.btn_search_title.setText('🔍')
         self.btn_search_title.setToolTip('搜索')
-        if self.label_stats.text().startswith('⏹ 正在停止搜索'):
+        if self.results_table.rowCount() == 0:
             self.label_stats.setText('已停止搜索')
-        self.search_thread = None
+
+    def _on_parse_thread_finished_cleanup(self):
+        """解析线程结束后的清理（由用户停止触发）"""
+        # 防止重复执行
+        if self.parse_thread is None:
+            return
+        # 断开此信号连接（防止重复触发）
+        try:
+            self.parse_thread.finished.disconnect(self._on_parse_thread_finished_cleanup)
+        except TypeError:
+            pass
+        if self.parse_thread and self.parse_thread.isRunning():
+            self.parse_thread.wait()
+        if self.parse_thread:
+            self.parse_thread.deleteLater()
+            self.parse_thread = None
+        # 恢复UI
+        self.is_parsing = False
+        self._set_ui_enabled(True)
+        self.button_parse_playlist.setEnabled(True)
+        self.button_parse_playlist.setText('📋 解析歌单')
+        if self.label_stats.text().startswith('⏹ 正在停止解析'):
+            self.label_stats.setText('已停止解析')
 
     def _set_ui_enabled(self, enabled: bool):
         self.search_input.setEnabled(enabled)
@@ -2362,18 +2427,17 @@ class MusicdlGUI(QWidget):
         if self.results_table.rowCount() == 0:
             if not self.label_stats.text().startswith('❌'):
                 self.label_stats.setText('❌ 未找到任何结果')
-        if self.search_thread:
-            try:
-                self.search_thread.deleteLater()
-            except Exception:
-                pass
-            self.search_thread = None
+        # 不再操作 self.search_thread
 
-    def on_source_started(self, source_internal: str):
+    def on_source_started(self, task_id: int, source_internal: str):
+        if task_id != self.current_search_task_id:
+            return
         display = self._internal_to_display(source_internal)
         self.label_stats.setText(f'⏳ 正在搜索 {display} ...')
 
-    def on_source_finished(self, source_internal: str, results: List):
+    def on_source_finished(self, task_id: int, source_internal: str, results: List):
+        if task_id != self.current_search_task_id:
+            return
         display = self._internal_to_display(source_internal)
         count = len(results)
         self._source_counts[source_internal] = count
@@ -2440,17 +2504,28 @@ class MusicdlGUI(QWidget):
             f'⏳ 已搜索 {done}/{total_sources} 个源，共 {total} 条结果'
         )
 
-    def on_search_finished(self):
-        if self.search_in_progress:
-            self.finish_search()
-            total = self.results_table.rowCount()
-            if total > 0:
-                self.label_stats.setText(f'✅ 搜索完成，共 {total} 条结果')
-            else:
-                self.label_stats.setText('❌ 未搜索到任何结果')
-            QTimer.singleShot(100, self._adjust_column_widths)
+    def on_search_finished(self, task_id: int):
+        if task_id != self.current_search_task_id:
+            return
+        self.search_in_progress = False
+        self.finish_search()
+        total = self.results_table.rowCount()
+        if total > 0:
+            self.label_stats.setText(f'✅ 搜索完成，共 {total} 条结果')
+        else:
+            self.label_stats.setText('❌ 未搜索到任何结果')
+        QTimer.singleShot(100, self._adjust_column_widths)
+        if self.search_thread:
+            try:
+                self.search_thread.finished.disconnect()
+            except TypeError:
+                pass
+            self.search_thread.deleteLater()
+            self.search_thread = None
 
-    def on_search_error(self, error_msg: str):
+    def on_search_error(self, task_id: int, error_msg: str):
+        if task_id != self.current_search_task_id:
+            return
         QMessageBox.warning(self, '搜索警告', error_msg)
 
     def _internal_to_display(self, internal: str) -> str:
@@ -2481,29 +2556,51 @@ class MusicdlGUI(QWidget):
             QMessageBox.warning(self, '警告', '请选择有效的歌单平台')
             return
 
-        self._parse_ignore_signals = False
+        # 生成新任务ID
+        self.parse_task_counter += 1
+        self.current_parse_task_id = self.parse_task_counter
+
         self._set_ui_enabled(False)
         self.button_parse_playlist.setEnabled(True)
         self.button_parse_playlist.setText('⏹ 停止')
         self.is_parsing = True
         self.label_stats.setText('⏳ 正在解析歌单...')
 
-        self.parse_thread = PlaylistParseThread(playlist_url, source_internal, source_display)
+        self.parse_thread = PlaylistParseThread(
+            playlist_url,
+            source_internal,
+            source_display,
+            task_id=self.current_parse_task_id
+        )
         self.parse_thread.parse_started.connect(self._on_parse_started)
         self.parse_thread.parse_finished.connect(self._on_parse_finished)
         self.parse_thread.parse_error.connect(self._on_parse_error)
-        self.parse_thread.finished.connect(self._on_parse_thread_finished)
+        # 不再连接 finished，因为停止或正常完成时已在各自的槽中处理
         self.parse_thread.start()
 
     def stop_parse(self):
-        if self.parse_thread and self.parse_thread.isRunning():
-            self.parse_thread.stop()
-            self._parse_ignore_signals = True
-            self._restore_parse_ui()
-            try:
-                self.parse_thread.finished.disconnect(self._on_parse_thread_finished)
-            except TypeError:
-                pass
+        if self.is_parsing:
+            if self.parse_thread and self.parse_thread.isRunning():
+                self.parse_thread.stop()
+                # 断开所有UI信号
+                for sig in ['parse_started', 'parse_finished', 'parse_error']:
+                    try:
+                        getattr(self.parse_thread, sig).disconnect()
+                    except TypeError:
+                        pass
+                # 先断开所有 finished 连接（避免重复）
+                try:
+                    self.parse_thread.finished.disconnect()
+                except TypeError:
+                    pass
+                # 连接清理槽
+                self.parse_thread.finished.connect(self._on_parse_thread_finished_cleanup)
+            # 恢复UI
+            self.is_parsing = False
+            self._set_ui_enabled(True)
+            self.button_parse_playlist.setEnabled(True)
+            self.button_parse_playlist.setText('📋 解析歌单')
+            self.label_stats.setText('⏹ 已停止解析')
         else:
             self._restore_parse_ui()
 
@@ -2515,13 +2612,13 @@ class MusicdlGUI(QWidget):
         if self.label_stats.text().startswith('⏹ 正在停止解析'):
             self.label_stats.setText('已停止解析')
 
-    def _on_parse_started(self):
-        if self._parse_ignore_signals:
+    def _on_parse_started(self, task_id: int):
+        if task_id != self.current_parse_task_id:
             return
         self.label_stats.setText('⏳ 正在解析歌单...')
 
-    def _on_parse_finished(self, song_infos, source_display):
-        if self._parse_ignore_signals:
+    def _on_parse_finished(self, task_id: int, song_infos, source_display):
+        if task_id != self.current_parse_task_id:
             return
         current_row = self.results_table.rowCount()
         self.results_table.setRowCount(current_row + len(song_infos))
@@ -2546,20 +2643,30 @@ class MusicdlGUI(QWidget):
 
         self.label_stats.setText(f'✅ 歌单解析成功，共 {len(song_infos)} 首歌曲')
         QTimer.singleShot(100, self._adjust_column_widths)
+        # 解析完成后恢复UI并删除线程
+        self._restore_parse_ui()
+        if self.parse_thread:
+            try:
+                self.parse_thread.finished.disconnect()
+            except TypeError:
+                pass
+            self.parse_thread.deleteLater()
+            self.parse_thread = None
 
-    def _on_parse_error(self, error_msg):
-        if self._parse_ignore_signals:
+    def _on_parse_error(self, task_id: int, error_msg):
+        if task_id != self.current_parse_task_id:
             return
         logger.error(f"歌单解析错误: {error_msg}")
         QMessageBox.critical(self, '解析失败', f'歌单解析出错：{error_msg}\n\n请确认链接格式正确且平台支持。')
         self.label_stats.setText('❌ 歌单解析失败')
-
-    def _on_parse_thread_finished(self):
-        if not self._parse_ignore_signals:
-            self._restore_parse_ui()
-        else:
-            self._parse_ignore_signals = False
-        self.parse_thread = None
+        self._restore_parse_ui()
+        if self.parse_thread:
+            try:
+                self.parse_thread.finished.disconnect()
+            except TypeError:
+                pass
+            self.parse_thread.deleteLater()
+            self.parse_thread = None
 
     def clear_results(self):
         self.results_table.setRowCount(0)
@@ -2608,6 +2715,7 @@ class MusicdlGUI(QWidget):
             except Exception as e:
                 QMessageBox.critical(self, '错误', f'无法创建目录：{str(e)}')
                 return
+        self._download_cancelled = False
 
         fmt = self._get_filename_template()
         dl_lyric = self.settings['download_lyric']
@@ -2639,6 +2747,7 @@ class MusicdlGUI(QWidget):
             except TypeError:
                 pass
 
+        self._download_cancelled = True
         self._download_queue.clear()
         files_to_delete = self._downloaded_files.copy()
 
@@ -2685,6 +2794,8 @@ class MusicdlGUI(QWidget):
         return kwargs
 
     def _start_next_download(self):
+        if self._download_cancelled:
+            return
         if self._download_current_index >= len(self._download_queue):
             self._on_all_downloads_finished()
             return
@@ -2725,6 +2836,8 @@ class MusicdlGUI(QWidget):
         self._start_next_download()
 
     def _on_single_download_error(self, error_msg):
+        if self._download_cancelled:
+            return
         QMessageBox.critical(self, '下载错误', f'下载失败：{error_msg}')
         self._download_current_index += 1
         self.bar_overall.setValue(self._download_current_index)
@@ -2732,6 +2845,7 @@ class MusicdlGUI(QWidget):
 
     def _on_all_downloads_finished(self, cancelled=False):
         self.is_downloading = False
+        self._download_cancelled = False
         self._set_ui_enabled(True)
         self.results_table.setEnabled(True)
         self.action_download.setEnabled(True)
@@ -2844,21 +2958,30 @@ class MusicdlGUI(QWidget):
                 self._vis_download_thread.stop()
                 self._vis_download_thread.wait()
             self._vis_download_thread = None
-        if self.search_thread and self.search_thread.isRunning():
+
+        # 安全检查：如果 search_thread 还存在且未被删除
+        if self.search_thread is not None:
             try:
-                self.search_thread.stop()
-            except Exception:
+                if self.search_thread.isRunning():
+                    self.search_thread.stop()
+            except RuntimeError:
+                # 对象已被删除，忽略
                 pass
-        if self.download_thread and self.download_thread.isRunning():
+
+        if self.download_thread is not None:
             try:
-                self.download_thread.stop()
-            except Exception:
+                if self.download_thread.isRunning():
+                    self.download_thread.stop()
+            except RuntimeError:
                 pass
-        if self.parse_thread and self.parse_thread.isRunning():
+
+        if self.parse_thread is not None:
             try:
-                self.parse_thread.stop()
-            except Exception:
+                if self.parse_thread.isRunning():
+                    self.parse_thread.stop()
+            except RuntimeError:
                 pass
+
         if self.player.state() != PlayerState.StoppedState:
             self.player.stop()
         self._cover_task_id += 1
@@ -3075,9 +3198,9 @@ class MusicdlGUI(QWidget):
 
     def update_play_button(self, state: PlayerState):
         if state == PlayerState.PlayingState:
-            self.btn_play.setText("⏸ 暂停")
+            self.btn_play.setText("⏸")
         else:
-            self.btn_play.setText("▶ 播放")
+            self.btn_play.setText("▶")
 
     def handle_media_status(self, status: PlayerMediaStatus):
         if status == PlayerMediaStatus.InvalidMedia:
@@ -3165,6 +3288,8 @@ class MusicdlGUI(QWidget):
         else:
             self.current_lyrics = []
         self.current_lyric_index = -1
+        self.lyric_display.clear()
+        
         self.update_lyric_display(0)
 
         self.player.play(volume=self.slider_volume.value())
@@ -3219,6 +3344,7 @@ class MusicdlGUI(QWidget):
         return lyrics
 
     def update_lyric_display(self, pos_ms: int):
+        # 如果没有歌词数据
         if not self.current_lyrics:
             if self.lyric_display.count() == 0 or self.lyric_display.item(0).text() != "暂无歌词":
                 self.lyric_display.clear()
@@ -3226,66 +3352,52 @@ class MusicdlGUI(QWidget):
                 self.current_lyric_index = -1
             return
 
-        selected_index = -1
+        # 检查是否已填充歌词列表（若为空则先填充）
+        if self.lyric_display.count() == 0:
+            self.lyric_display.clear()
+            for _, text in self.current_lyrics:
+                item = QListWidgetItem(text)
+                self.lyric_display.addItem(item)
+            # 初始化高亮索引为 -1，后续更新会设置正确位置
+            self.current_lyric_index = -1
+
+        # 计算当前时间对应的歌词索引
+        new_idx = -1
         for i, (t, _) in enumerate(self.current_lyrics):
             if t <= pos_ms:
-                selected_index = i
+                new_idx = i
             else:
                 break
 
-        if selected_index == self.current_lyric_index:
+        # 如果索引未变，则无需更新
+        if new_idx == self.current_lyric_index:
             return
 
-        self.current_lyric_index = selected_index
-        self.lyric_display.clear()
-        for i, (_, text) in enumerate(self.current_lyrics):
-            item = QListWidgetItem(text)
-            if i == selected_index:
-                item.setBackground(QColor(0,130,255))
-                item.setForeground(QColor(0,240,240))
-                font = item.font()
-                font.setBold(True)
-                item.setFont(font)
-            self.lyric_display.addItem(item)
+        # 清除旧高亮
+        if self.current_lyric_index != -1 and self.current_lyric_index < self.lyric_display.count():
+            old_item = self.lyric_display.item(self.current_lyric_index)
+            old_item.setBackground(QColor(0, 0, 0, 0))
+            old_item.setForeground(QColor(44, 62, 80))
+            f = old_item.font()
+            f.setBold(False)
+            old_item.setFont(f)
 
-        if selected_index >= 0:
-            self.lyric_display.scrollToItem(
-                self.lyric_display.item(selected_index),
-                QAbstractItemView.PositionAtCenter
-            )
+        # 设置新高亮
+        self.current_lyric_index = new_idx
+        if new_idx != -1 and new_idx < self.lyric_display.count():
+            new_item = self.lyric_display.item(new_idx)
+            new_item.setBackground(QColor(0, 130, 255))
+            new_item.setForeground(QColor(0, 240, 240))
+            f = new_item.font()
+            f.setBold(True)
+            new_item.setFont(f)
+            self.lyric_display.scrollToItem(new_item, QAbstractItemView.PositionAtCenter)
 
     def clear_lyric_display(self):
         self.current_lyrics = []
         self.current_lyric_index = -1
         self.lyric_display.clear()
         self.lyric_display.addItem("停止播放")
-
-    def _set_save_path(self, path: str):
-        if not os.path.exists(path):
-            try:
-                os.makedirs(path)
-            except Exception as e:
-                QMessageBox.warning(self, '错误', f'无法创建目录：{e}')
-                return
-        self.settings['save_dir'] = path
-
-    def _set_path_from_dialog(self):
-        path = QFileDialog.getExistingDirectory(self, "选择保存目录", self.settings['save_dir'])
-        if path:
-            self._set_save_path(path)
-
-    def open_download_folder(self):
-        folder = self.settings['save_dir']
-        if not folder:
-            QMessageBox.warning(self, '警告', '保存路径为空')
-            return
-        if not os.path.exists(folder):
-            try:
-                os.makedirs(folder)
-            except Exception as e:
-                QMessageBox.critical(self, '错误', f'无法创建目录：{e}')
-                return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
     def _get_filename_template(self) -> str:
         fmt = self.settings['filename_format']
