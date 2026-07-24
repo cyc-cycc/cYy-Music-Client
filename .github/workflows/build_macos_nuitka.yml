@@ -87,7 +87,7 @@ jobs:
         nuitka --standalone \
                --macos-create-app-bundle \
                --enable-plugin=pyqt5 \
-               --plugin-enable=qt-plugins \
+               --include-qt-plugins=platforms,imageformats \
                --include-module=matplotlib.backends.backend_qt5agg \
                --include-module=numba \
                --include-module=sklearn.utils._cython_blas \
@@ -109,7 +109,7 @@ jobs:
                --app-icon=icon.icns \
                --app-bundle-id=com.yourcompany.musicdlgui \
                --macos-app-protected=0 \
-               --macos-target-arm64     # 若需要通用二进制可改为 --macos-target-universal2 \
+               --macos-target-arm64 \
                main.py
 
     - name: Create DMG installer
