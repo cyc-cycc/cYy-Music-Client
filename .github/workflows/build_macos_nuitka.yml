@@ -1,7 +1,7 @@
 name: Build macOS App with Nuitka
 
 on:
-  workflow_dispatch:   # 手动触发
+  workflow_dispatch:
 
 jobs:
   build:
@@ -20,57 +20,37 @@ jobs:
       run: |
         brew install --cask vlc
         brew install ffmpeg portaudio
-        # 确保 VLC 库和插件存在
-        VLC_LIB="/Applications/VLC.app/Contents/MacOS/lib"
-        if [ ! -d "$VLC_LIB" ]; then
-          echo "VLC not installed correctly"
-          exit 1
-        fi
 
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         pip install nuitka
-        pip install ordered-set   # Nuitka 有时需要
+        pip install ordered-set
 
     - name: Prepare resources (VLC, FFmpeg, PortAudio)
       run: |
-        # 创建资源目录，用于打包到 app 内
         mkdir -p resources/vlc/lib resources/vlc/plugins resources/ffmpeg/bin resources/ffmpeg/lib
 
-        # 复制 VLC 动态库
         cp /Applications/VLC.app/Contents/MacOS/lib/libvlc.dylib resources/vlc/lib/
         cp /Applications/VLC.app/Contents/MacOS/lib/libvlccore.dylib resources/vlc/lib/
-
-        # 复制 VLC 插件（完整复制，后续可精简）
         cp -r /Applications/VLC.app/Contents/MacOS/plugins resources/vlc/
 
-        # 精简 VLC 插件（仅保留音频播放必需的）
         cd resources/vlc/plugins
-        # 删除视频、界面、转码、流输出、访问输出等无用于本项目的目录
         rm -rf video_output gui skins mux services_discovery control lua access_output stream_out
-        # 在 codec 中只保留音频解码器（删除视频解码器）
         find codec -name "*.dylib" | grep -v -E "(mad|flac|vorbis|faad|opus|mpg123|a52|dca|speex|theora)" | xargs rm -f
-        # 在 demux 中只保留音频容器
         find demux -name "*.dylib" | grep -v -E "(mp4|ogg|wav|flac|aiff|au|voc|rawaud|mod)" | xargs rm -f
-        # packetizer 保留与音频相关的
         find packetizer -name "*.dylib" | grep -v -E "(flac|vorbis|mpegaudio|mp4|a52|dts)" | xargs rm -f
-        # access 保留 file、http、https
         find access -name "*.dylib" | grep -v -E "(file|http|https|ftp)" | xargs rm -f
-        # audio_output 保留 coreaudio
         find audio_output -name "*.dylib" | grep -v -E "(coreaudio)" | xargs rm -f
         cd ../../..
 
-        # 复制 FFmpeg 可执行文件和库
         FFMPEG_PREFIX=$(brew --prefix ffmpeg)
         cp "$FFMPEG_PREFIX/bin/ffmpeg" resources/ffmpeg/bin/
-        # 复制 FFmpeg 依赖库（如果存在）
         if [ -d "$FFMPEG_PREFIX/lib" ]; then
           cp -r "$FFMPEG_PREFIX/lib/"* resources/ffmpeg/lib/
         fi
 
-        # 复制 PortAudio 库（sounddevice 依赖）
         PORTAUDIO_LIB=$(brew --prefix portaudio)/lib/libportaudio.dylib
         if [ -f "$PORTAUDIO_LIB" ]; then
           cp "$PORTAUDIO_LIB" resources/ffmpeg/lib/
@@ -83,10 +63,11 @@ jobs:
                --enable-plugin=pyqt5 \
                --include-qt-plugins=platforms,imageformats \
                --macos-app-name="cYy Music Client" \
-               --macos-app-version="4.2.0" \
+               --product-version="4.2.0" \
                --macos-app-icon=icon.icns \
-               --macos-app-bundle-id=com.yourcompany.musicdlgui \
-               --macos-target-arm64 \
+               --macos-signed-app-name=com.yourcompany.musicdlgui \
+               --macos-target-arch=arm64 \
+               --macos-app-mode=ui-element \
                --include-module=matplotlib.backends.backend_qt5agg \
                --include-module=numba \
                --include-module=sklearn.utils._cython_blas \
