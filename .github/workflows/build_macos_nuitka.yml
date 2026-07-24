@@ -36,16 +36,6 @@ jobs:
         cp /Applications/VLC.app/Contents/MacOS/lib/libvlccore.dylib resources/vlc/lib/
         cp -r /Applications/VLC.app/Contents/MacOS/plugins resources/vlc/
 
-        # 精简 VLC 插件（仅保留音频相关）
-        cd resources/vlc/plugins
-        rm -rf video_output gui skins mux services_discovery control lua access_output stream_out
-        find codec -name "*.dylib" | grep -v -E "(mad|flac|vorbis|faad|opus|mpg123|a52|dca|speex|theora)" | xargs rm -f
-        find demux -name "*.dylib" | grep -v -E "(mp4|ogg|wav|flac|aiff|au|voc|rawaud|mod)" | xargs rm -f
-        find packetizer -name "*.dylib" | grep -v -E "(flac|vorbis|mpegaudio|mp4|a52|dts)" | xargs rm -f
-        find access -name "*.dylib" | grep -v -E "(file|http|https|ftp)" | xargs rm -f
-        find audio_output -name "*.dylib" | grep -v -E "(coreaudio)" | xargs rm -f
-        cd ../../..
-
         FFMPEG_PREFIX=$(brew --prefix ffmpeg)
         cp "$FFMPEG_PREFIX/bin/ffmpeg" resources/ffmpeg/bin/
         if [ -d "$FFMPEG_PREFIX/lib" ]; then
@@ -74,15 +64,25 @@ jobs:
                --include-data-dir=resources=resources \
                --output-dir=dist \
                --assume-yes-for-downloads \
+               --jobs=2 \
                main.py
+
+    - name: List dist contents (debug)
+      run: |
+        echo "Contents of dist:"
+        ls -la dist/
+        echo "Finding .app bundles:"
+        find dist -name "*.app" -type d
 
     - name: Create DMG installer
       run: |
-        APP_PATH="dist/cYy Music Client.app"
-        if [ ! -d "$APP_PATH" ]; then
-          echo "App bundle not found"
+        APP_PATH=$(find dist -name "*.app" -type d | head -n 1)
+        if [ -z "$APP_PATH" ]; then
+          echo "No .app bundle found in dist/"
+          ls -la dist/
           exit 1
         fi
+        echo "Found app bundle: $APP_PATH"
         mkdir -p dmg_staging
         cp -R "$APP_PATH" dmg_staging/
         ln -s /Applications dmg_staging/Applications
