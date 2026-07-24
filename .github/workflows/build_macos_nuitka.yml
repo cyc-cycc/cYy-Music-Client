@@ -36,6 +36,7 @@ jobs:
         cp /Applications/VLC.app/Contents/MacOS/lib/libvlccore.dylib resources/vlc/lib/
         cp -r /Applications/VLC.app/Contents/MacOS/plugins resources/vlc/
 
+        # 精简 VLC 插件（仅保留音频相关）
         cd resources/vlc/plugins
         rm -rf video_output gui skins mux services_discovery control lua access_output stream_out
         find codec -name "*.dylib" | grep -v -E "(mad|flac|vorbis|faad|opus|mpg123|a52|dca|speex|theora)" | xargs rm -f
@@ -68,19 +69,7 @@ jobs:
                --macos-signed-app-name=com.yourcompany.musicdlgui \
                --macos-target-arch=arm64 \
                --macos-app-mode=ui-element \
-               --include-module=matplotlib.backends.backend_qt5agg \
-               --include-module=numba \
-               --include-module=sklearn.utils._cython_blas \
-               --include-module=scipy.special._cdflib \
-               --include-module=scipy.linalg.cython_blas \
-               --include-module=scipy.linalg.cython_lapack \
-               --include-module=sounddevice \
-               --include-module=librosa \
-               --include-module=mutagen \
-               --include-module=requests \
-               --include-module=filetype \
-               --include-module=musicdl \
-               --include-module=vlc \
+               --module-parameter=numba-disable-jit=yes \
                --include-module=PyQt5.sip \
                --include-data-dir=resources=resources \
                --output-dir=dist \
