@@ -3,9 +3,9 @@
 import os
 import subprocess
 
-APP_NAME = 'cYy-Music-Client_macos-arm64'
+APP_NAME = 'cYy-Music-Client_macos-arm64'   # 最终 .app 名称
 EXE_NAME = APP_NAME + '_bin'
-ICON_PATH = 'icon.icns'
+ICON_PATH = 'icon.icns'                     # 请确保此文件存在
 
 # ----- 查找 VLC -----
 VLC_LIB_DIR = '/Applications/VLC.app/Contents/MacOS/lib'
@@ -54,7 +54,7 @@ datas = [
     (ffmpeg_lib, 'ffmpeg/lib'),
 ]
 
-# ----- 查找 portaudio -----
+# ----- 查找 portaudio (sounddevice 依赖) -----
 PORT_AUDIO_LIB = None
 for p in ['/usr/local/lib/libportaudio.dylib', '/opt/homebrew/lib/libportaudio.dylib']:
     if os.path.exists(p):
@@ -67,7 +67,7 @@ else:
 
 # ----- 分析 -----
 a = Analysis(
-    ['cYy-Music-Client.py'],
+    ['main.py'],                         # 入口文件改为 main.py
     pathex=[],
     binaries=[],
     datas=datas,
@@ -86,10 +86,46 @@ a = Analysis(
         'filetype',
         'musicdl',
         'vlc',
+        'PyQt5.sip',                     # 确保 PyQt5 相关隐式导入
     ],
     hookspath=[],
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        # 排除不需要的 PyQt5 模块，显著减小体积
+        'PyQt5.QtWebEngine',
+        'PyQt5.QtWebEngineWidgets',
+        'PyQt5.QtMultimedia',
+        'PyQt5.QtMultimediaWidgets',
+        'PyQt5.QtSensors',
+        'PyQt5.QtOpenGL',
+        'PyQt5.QtSql',
+        'PyQt5.QtNetwork',
+        'PyQt5.QtPositioning',
+        'PyQt5.QtPrintSupport',
+        'PyQt5.QtQml',
+        'PyQt5.QtQuick',
+        'PyQt5.QtRemoteObjects',
+        'PyQt5.QtScxml',
+        'PyQt5.QtScript',
+        'PyQt5.QtScriptTools',
+        'PyQt5.QtTextToSpeech',
+        'PyQt5.QtWebChannel',
+        'PyQt5.QtWebSockets',
+        'PyQt5.QtXmlPatterns',
+        'PyQt5.Qt3DAnimation',
+        'PyQt5.Qt3DCore',
+        'PyQt5.Qt3DExtras',
+        'PyQt5.Qt3DInput',
+        'PyQt5.Qt3DLogic',
+        'PyQt5.Qt3DRender',
+        'PyQt5.QtGamepad',
+        'PyQt5.QtVirtualKeyboard',
+        'PyQt5.QtChart',
+        'PyQt5.QtDataVisualization',
+        'PyQt5.QtPurchasing',
+        'PyQt5.QtBluetooth',
+        'PyQt5.QtNfc',
+    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=None,
@@ -107,11 +143,11 @@ exe = EXE(
     name=EXE_NAME,
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
+    strip=False,               # macOS 下 strip 可用，但为减少体积可选，有时会报错，故关闭
+    upx=False,                 # macOS 上 UPX 支持有限，关闭
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,
+    console=False,             # 无控制台窗口
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
@@ -126,7 +162,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name=APP_NAME,
 )
@@ -137,8 +173,8 @@ app = BUNDLE(
     icon=ICON_PATH if os.path.exists(ICON_PATH) else None,
     bundle_identifier='com.yourcompany.musicdlgui',
     info_plist={
-        'CFBundleShortVersionString': '4.1.0',
-        'CFBundleVersion': '4.1.0',
+        'CFBundleShortVersionString': '4.2.0',
+        'CFBundleVersion': '4.2.0',
         'CFBundleName': 'cYy Music Client',
         'CFBundleDisplayName': 'cYy Music Client',
         'NSHighResolutionCapable': True,

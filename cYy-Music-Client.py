@@ -153,7 +153,7 @@ from PyQt5.QtGui import (
 from PyQt5.QtCore import (
     QThread, pyqtSignal, Qt, QTimer, QObject,
     QRunnable, QThreadPool, pyqtSlot, QPoint, QRect,
-    QRectF, QUrl
+    QRectF, QUrl, QSize
 )
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QCheckBox, QLineEdit,
@@ -1407,6 +1407,136 @@ class AudioVisualizer(QMainWindow):
 class UpdateSignals(QObject):
     update_ui = pyqtSignal()
 
+# ==================== 自定义卡片 ====================
+class SongCard(QFrame):
+    """自定义歌曲卡片"""
+    def __init__(self, song_info, source_display=None, parent=None):
+        super().__init__(parent)
+        self.song_info = song_info
+        self.source_display = source_display
+        self.setFrameStyle(QFrame.NoFrame)
+        self.setObjectName("songCard")
+        self.setFixedHeight(100)
+        self._init_ui()
+        self._load_cover()
+
+    def _init_ui(self):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 5, 10, 5)
+        layout.setSpacing(10)
+
+        # 封面
+        self.cover_label = QLabel()
+        self.cover_label.setFixedSize(80, 80)
+        self.cover_label.setStyleSheet("border-radius: 6px; background-color: #E8EDF2;")
+        self.cover_label.setAlignment(Qt.AlignCenter)
+        self.cover_label.setText("🎵")
+        self.cover_label.setScaledContents(True)
+        layout.addWidget(self.cover_label)
+
+        # 信息区域
+        info_widget = QWidget()
+        info_layout = QVBoxLayout(info_widget)
+        info_layout.setContentsMargins(0, 0, 0, 0)
+        info_layout.setSpacing(2)
+
+        self.name_label = QLabel(self.song_info.get('song_name', '未知歌曲'))
+        self.name_label.setFont(QFont("Microsoft YaHei", 16, QFont.Bold))
+        self.name_label.setStyleSheet("color: #2C3E50;")
+        info_layout.addWidget(self.name_label)
+
+        self.singer_label = QLabel(self.song_info.get('singers', '未知歌手'))
+        self.singer_label.setStyleSheet("color: #5D6D7E; font-size: 12px;")
+        info_layout.addWidget(self.singer_label)
+
+        album = self.song_info.get('album', '')
+        duration = self.song_info.get('duration', '')
+        detail_text = f"{album}" if album else ""
+        if duration:
+            detail_text += f"  •  {duration}" if detail_text else duration
+        self.detail_label = QLabel(detail_text)
+        self.detail_label.setStyleSheet("color: #7F8C8D; font-size: 14px;")
+        info_layout.addWidget(self.detail_label)
+
+        source = self.source_display or self.song_info.get('source', '')
+        if source:
+            self.source_label = QLabel(source)
+            self.source_label.setStyleSheet(
+                "background-color: #D5D8DC; color: #2C3E50; padding: 2px 8px; border-radius: 10px; font-size: 11px;"
+            )
+            self.source_label.setAlignment(Qt.AlignCenter)
+            info_layout.addWidget(self.source_label)
+
+        layout.addWidget(info_widget, 1)
+
+        # 卡片样式
+        self.setStyleSheet("""
+            #songCard {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                            stop:0 #FFFFFF, stop:1 #F4F6F9);
+                border: 1px solid #DDE1E6;
+                border-radius: 8px;
+            }
+            #songCard:hover {
+                border: 1px solid #4A90D9;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                            stop:0 #F0F7FF, stop:1 #E1EEFA);
+            }
+        """)
+        from PyQt5.QtWidgets import QGraphicsDropShadowEffect
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(10)
+        shadow.setColor(QColor(0, 0, 0, 30))
+        shadow.setOffset(0, 2)
+        self.setGraphicsEffect(shadow)
+
+    def _load_cover(self):
+        cover_url = self.song_info.get('cover_url') or self.song_info.get('cover')
+        if cover_url:
+            class CoverLoader(QThread):
+                finished = pyqtSignal(bytes)
+                def __init__(self, url):
+                    super().__init__()
+                    self.url = url
+                def run(self):
+                    try:
+                        import requests
+                        resp = requests.get(self.url, timeout=10)
+                        if resp.status_code == 200:
+                            self.finished.emit(resp.content)
+                    except Exception:
+                        pass
+            self.loader = CoverLoader(cover_url)
+            self.loader.finished.connect(self._set_cover_pixmap)
+            self.loader.start()
+
+    def _set_cover_pixmap(self, data):
+        pix = QPixmap()
+        if pix.loadFromData(data):
+            scaled = pix.scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.cover_label.setPixmap(scaled)
+            self.cover_label.setText("")
+
+    def set_selected(self, selected):
+        if selected:
+            self.setStyleSheet(self.styleSheet() + """
+                #songCard { border: 2px solid #4A90D9; background: #E8F0FE; }
+            """)
+        else:
+            self.setStyleSheet("""
+                #songCard {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                                stop:0 #FFFFFF, stop:1 #F4F6F9);
+                    border: 1px solid #DDE1E6;
+                    border-radius: 8px;
+                }
+                #songCard:hover {
+                    border: 1px solid #4A90D9;
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                                stop:0 #F0F7FF, stop:1 #E1EEFA);
+                }
+            """)
+
 # ==================== 设置对话框 ====================
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
@@ -1828,25 +1958,52 @@ class MusicdlGUI(QWidget):
 
         # ---- 结果表格与播放器左右布局 ----
         splitter = QSplitter(Qt.Horizontal)
-        splitter.splitterMoved.connect(self._adjust_column_widths)
         splitter.setHandleWidth(3)  # 可选，调整分隔条宽度
 
         # 左侧表格
-        self.results_table = QTableWidget()
-        self.results_table.setColumnCount(6)
-        self.results_table.setHorizontalHeaderLabels(['歌手', '歌曲名', '文件大小', '时长', '专辑', '来源'])
-        self.results_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.results_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.results_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.results_table.setAlternatingRowColors(True)
-        self.results_table.setObjectName('resultTable')
-        self.results_table.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
-        header = self.results_table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Fixed)
-        header.setStretchLastSection(False)
-        self.results_table.customContextMenuRequested.connect(self.show_context_menu)
-        self.results_table.doubleClicked.connect(self.on_table_double_click)
-        splitter.addWidget(self.results_table)
+        self.result_list = QListWidget()
+        self.result_list.setObjectName("resultList")
+        self.result_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.result_list.setSpacing(5)
+        self.result_list.setStyleSheet("""
+            QListWidget#resultList {
+                background: transparent;
+                border: none;
+                outline: none;
+            }
+            QListWidget::item {
+                background: transparent;
+                border: none;
+            }
+            /* 滚动条背景透明 */
+            QListWidget#resultList QScrollBar:vertical {
+                background: transparent;
+                width: 6px;
+                margin: 0px;
+            }
+            /* 滑块样式 */
+            QListWidget#resultList QScrollBar::handle:vertical {
+                background: rgba(160, 160, 160, 180);
+                border-radius: 3px;
+                min-height: 20px;
+            }
+            /* 隐藏上下箭头 */
+            QListWidget#resultList QScrollBar::add-line:vertical,
+            QListWidget#resultList QScrollBar::sub-line:vertical {
+                height: 0px;
+                background: transparent;
+            }
+            /* 滑块上下区域透明 */
+            QListWidget#resultList QScrollBar::add-page:vertical,
+            QListWidget#resultList QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+        """)
+        self.result_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.result_list.customContextMenuRequested.connect(self.show_context_menu)
+        self.result_list.itemSelectionChanged.connect(self.on_selection_changed)
+        # 双击信号已在 _init_signals 中连接
+        splitter.addWidget(self.result_list)
 
         # ---- 播放器（集成歌词） ----
         play_group = QGroupBox("播放控制")
@@ -1978,8 +2135,6 @@ class MusicdlGUI(QWidget):
         self.action_download.triggered.connect(self.download_selected)
 
         main_layout.addWidget(content_widget)
-
-        self.column_weights = [2.0, 2.0, 1.0, 1.0, 2.0, 1.5]
 
     def get_style_sheet(self):
         return """
@@ -2190,6 +2345,7 @@ class MusicdlGUI(QWidget):
         self.btn_prev.clicked.connect(self.play_prev)
         self.btn_next.clicked.connect(self.play_next)
         self.btn_visualize.clicked.connect(self.show_visualization)
+        self.result_list.itemDoubleClicked.connect(self.on_list_double_click)
 
     def _init_state(self):
         self.search_in_progress = False
@@ -2382,7 +2538,7 @@ class MusicdlGUI(QWidget):
         self.btn_search_title.setEnabled(True)
         self.btn_search_title.setText('🔍')
         self.btn_search_title.setToolTip('搜索')
-        if self.results_table.rowCount() == 0:
+        if self.result_list.count() == 0:
             self.label_stats.setText('已停止搜索')
 
     def _on_parse_thread_finished_cleanup(self):
@@ -2424,10 +2580,9 @@ class MusicdlGUI(QWidget):
         self.btn_search_title.setText('🔍')
         self.btn_search_title.setToolTip('搜索')
         self._set_ui_enabled(True)
-        if self.results_table.rowCount() == 0:
+        if self.result_list.count() == 0:
             if not self.label_stats.text().startswith('❌'):
                 self.label_stats.setText('❌ 未找到任何结果')
-        # 不再操作 self.search_thread
 
     def on_source_started(self, task_id: int, source_internal: str):
         if task_id != self.current_search_task_id:
@@ -2435,73 +2590,37 @@ class MusicdlGUI(QWidget):
         display = self._internal_to_display(source_internal)
         self.label_stats.setText(f'⏳ 正在搜索 {display} ...')
 
-    def on_source_finished(self, task_id: int, source_internal: str, results: List):
+    def on_source_finished(self, task_id, source_internal, results):
         if task_id != self.current_search_task_id:
             return
         display = self._internal_to_display(source_internal)
         count = len(results)
         self._source_counts[source_internal] = count
 
-        current_row = self.results_table.rowCount()
         dedup = self.settings.get('dedup', False)
-
+        existing = set()
         if dedup:
-            existing = set()
-            for row in range(self.results_table.rowCount()):
-                singer = self.results_table.item(row, 0).text() if self.results_table.item(row, 0) else ''
-                song = self.results_table.item(row, 1).text() if self.results_table.item(row, 1) else ''
-                existing.add((singer, song))
-            new_items = []
-            for idx, item in enumerate(results):
-                singer = item.get('singers', '')
-                song = item.get('song_name', '')
-                if (singer, song) not in existing:
-                    existing.add((singer, song))
-                    new_items.append((str(current_row + idx), item))
-        else:
-            new_items = [(str(current_row + idx), item) for idx, item in enumerate(results)]
+            for i in range(self.result_list.count()):
+                info = self.get_song_info_by_row(i)
+                if info:
+                    key = (info.get('singers', ''), info.get('song_name', ''))
+                    existing.add(key)
 
-        if not new_items:
-            total = self.results_table.rowCount()
-            done = sum(1 for v in self._source_counts.values() if v >= 0)
-            total_sources = len(self._source_counts)
-            self.label_stats.setText(
-                f'⏳ 已搜索 {done}/{total_sources} 个源，共 {total} 条结果（新增0条）'
-            )
-            return
+        added = 0
+        for info in results:
+            if dedup:
+                key = (info.get('singers', ''), info.get('song_name', ''))
+                if key in existing:
+                    continue
+                existing.add(key)
+            self.add_song_card(info, display)
+            added += 1
 
-        try:
-            self.results_table.setUpdatesEnabled(False)
-        except Exception:
-            pass
-        try:
-            self.results_table.setRowCount(current_row + len(new_items))
-            for idx, (row_key, item) in enumerate(new_items):
-                row = current_row + idx
-                self.music_records[row_key] = item
-                col_data = [
-                    item.get('singers', ''),
-                    item.get('song_name', ''),
-                    item.get('file_size', ''),
-                    item.get('duration', ''),
-                    item.get('album', ''),
-                    display
-                ]
-                for col, text in enumerate(col_data):
-                    table_item = QTableWidgetItem(str(text))
-                    table_item.setTextAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
-                    self.results_table.setItem(row, col, table_item)
-        finally:
-            try:
-                self.results_table.setUpdatesEnabled(True)
-            except Exception:
-                pass
-
-        total = self.results_table.rowCount()
+        total = self.result_list.count()
         done = sum(1 for v in self._source_counts.values() if v >= 0)
         total_sources = len(self._source_counts)
         self.label_stats.setText(
-            f'⏳ 已搜索 {done}/{total_sources} 个源，共 {total} 条结果'
+            f'⏳ 已搜索 {done}/{total_sources} 个源，共 {total} 条结果（新增{added}条）'
         )
 
     def on_search_finished(self, task_id: int):
@@ -2509,12 +2628,11 @@ class MusicdlGUI(QWidget):
             return
         self.search_in_progress = False
         self.finish_search()
-        total = self.results_table.rowCount()
+        total = self.result_list.count()
         if total > 0:
             self.label_stats.setText(f'✅ 搜索完成，共 {total} 条结果')
         else:
             self.label_stats.setText('❌ 未搜索到任何结果')
-        QTimer.singleShot(100, self._adjust_column_widths)
         if self.search_thread:
             try:
                 self.search_thread.finished.disconnect()
@@ -2617,39 +2735,14 @@ class MusicdlGUI(QWidget):
             return
         self.label_stats.setText('⏳ 正在解析歌单...')
 
-    def _on_parse_finished(self, task_id: int, song_infos, source_display):
+    def _on_parse_finished(self, task_id, song_infos, source_display):
         if task_id != self.current_parse_task_id:
             return
-        current_row = self.results_table.rowCount()
-        self.results_table.setRowCount(current_row + len(song_infos))
-
-        for idx, song_info in enumerate(song_infos):
-            row = current_row + idx
-            row_key = str(row)
-            self.music_records[row_key] = song_info
-
-            col_data = [
-                song_info.get('singers', ''),
-                song_info.get('song_name', ''),
-                song_info.get('file_size', ''),
-                song_info.get('duration', ''),
-                song_info.get('album', ''),
-                source_display
-            ]
-            for col, text in enumerate(col_data):
-                table_item = QTableWidgetItem(str(text))
-                table_item.setTextAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
-                self.results_table.setItem(row, col, table_item)
-
+        for info in song_infos:
+            self.add_song_card(info, source_display)
         self.label_stats.setText(f'✅ 歌单解析成功，共 {len(song_infos)} 首歌曲')
-        QTimer.singleShot(100, self._adjust_column_widths)
-        # 解析完成后恢复UI并删除线程
         self._restore_parse_ui()
         if self.parse_thread:
-            try:
-                self.parse_thread.finished.disconnect()
-            except TypeError:
-                pass
             self.parse_thread.deleteLater()
             self.parse_thread = None
 
@@ -2668,8 +2761,38 @@ class MusicdlGUI(QWidget):
             self.parse_thread.deleteLater()
             self.parse_thread = None
 
+    def add_song_card(self, song_info, source_display=None):
+        """向列表添加一张卡片"""
+        row = self.result_list.count()
+        item = QListWidgetItem()
+        item.setSizeHint(QSize(0, 110))
+        card = SongCard(song_info, source_display, self.result_list)
+        self.result_list.addItem(item)
+        self.result_list.setItemWidget(item, card)
+        self.music_records[str(row)] = song_info
+        return row
+
+    def get_selected_rows(self):
+        """返回选中的行索引列表"""
+        rows = []
+        for item in self.result_list.selectedItems():
+            rows.append(self.result_list.row(item))
+        return rows
+
+    def get_song_info_by_row(self, row):
+        """根据行号获取歌曲信息"""
+        return self.music_records.get(str(row))
+
+    def on_selection_changed(self):
+        """卡片选中状态变化时更新样式"""
+        for i in range(self.result_list.count()):
+            item = self.result_list.item(i)
+            card = self.result_list.itemWidget(item)
+            if card:
+                card.set_selected(item.isSelected())
+
     def clear_results(self):
-        self.results_table.setRowCount(0)
+        self.result_list.clear()
         self.music_records.clear()
         self.label_stats.setText('已清空')
         self._source_counts.clear()
@@ -2677,18 +2800,20 @@ class MusicdlGUI(QWidget):
         self.current_play_index = -1
         self.stop_playback()
 
+    def on_list_double_click(self, item):
+        row = self.result_list.row(item)
+        self.play_song_at_row(row)
+
     def show_context_menu(self, pos):
-        if not self.is_downloading and self.results_table.rowCount() > 0:
-            self.context_menu.exec_(self.results_table.mapToGlobal(pos))
+        if not self.is_downloading and self.result_list.count() > 0 and self.result_list.selectedItems():
+            self.context_menu.exec_(self.result_list.mapToGlobal(pos))
 
     def download_selected(self):
         if self.is_downloading:
             QMessageBox.information(self, '提示', '正在下载中，请稍候...')
             return
 
-        selected_rows = set()
-        for item in self.results_table.selectedItems():
-            selected_rows.add(item.row())
+        selected_rows = set(self.get_selected_rows())
         if not selected_rows:
             QMessageBox.warning(self, '警告', '请先选择至少一首歌曲')
             return
@@ -2723,7 +2848,7 @@ class MusicdlGUI(QWidget):
 
         self.is_downloading = True
         self._set_ui_enabled(False)
-        self.results_table.setEnabled(False)
+        self.result_list.setEnabled(False)
         self.action_download.setEnabled(False)
 
         self._download_queue = songs_to_download.copy()
@@ -2847,7 +2972,7 @@ class MusicdlGUI(QWidget):
         self.is_downloading = False
         self._download_cancelled = False
         self._set_ui_enabled(True)
-        self.results_table.setEnabled(True)
+        self.result_list.setEnabled(True)
         self.action_download.setEnabled(True)
         if not cancelled:
             self.bar_download.setValue(0)
@@ -2868,31 +2993,13 @@ class MusicdlGUI(QWidget):
             self.download_thread = None
         self._download_queue = []
         self._downloaded_files.clear()
-
-    def _adjust_column_widths(self):
-        if self._adjusting:
-            return
-        self._adjusting = True
-        table = self.results_table
-        total_width = table.viewport().width()
-        if total_width <= 0:
-            self._adjusting = False
-            return
-        weights = self.column_weights
-        total_weight = sum(weights)
-        header = table.horizontalHeader()
-        for col, weight in enumerate(weights):
-            width = int(total_width * weight / total_weight)
-            header.resizeSection(col, max(width, 30))
         self._adjusting = False
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._adjust_column_widths()
 
     def showEvent(self, event):
         super().showEvent(event)
-        QTimer.singleShot(0, self._adjust_column_widths)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -3249,10 +3356,10 @@ class MusicdlGUI(QWidget):
                 self.play_current()
 
     def play_song_at_row(self, row):
+        # 从列表构建播放列表
         playlist = []
-        for r in range(self.results_table.rowCount()):
-            row_key = str(r)
-            info = self.music_records.get(row_key)
+        for i in range(self.result_list.count()):
+            info = self.get_song_info_by_row(i)
             if info:
                 playlist.append(info)
         if not playlist:
