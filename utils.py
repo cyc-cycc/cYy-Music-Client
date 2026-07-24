@@ -13,69 +13,117 @@ import filetype
 
 from constants import DATA_DIR, LOG_DIR, LOG_FILE, DEFAULT_SAVE_DIR
 
-# ==================== 运行时路径设置 ====================
+# ==================== 资源路径查找工具 ====================
+def get_resource_path(relative_path: str) -> str:
+    """
+    在打包环境下（PyInstaller / Nuitka）返回资源的绝对路径。
+    开发环境下返回相对于当前文件的路径。
+    """
+    if getattr(sys, 'frozen', False):
+        # ----- PyInstaller 模式 -----
+        if hasattr(sys, '_MEIPASS'):
+            base = sys._MEIPASS
+        # ----- Nuitka 模式（standalone） -----
+        else:
+            # 在 macOS .app 中，可执行文件位于 .app/Contents/MacOS/
+            # 资源通常放在 .app/Contents/Resources/ 或与可执行文件同级
+            base = os.path.dirname(sys.executable)
+            # 如果可执行文件在 MacOS 目录下，资源在上级 Resources 目录
+            if sys.platform == 'darwin' and base.endswith('MacOS'):
+                base = os.path.join(base, '..', 'Resources')
+            # 如果是其他平台（Linux）可能在同一目录，暂不额外处理
+    else:
+        # ----- 开发模式（源码运行）-----
+        base = os.path.dirname(os.path.abspath(__file__))
+    
+    return os.path.join(base, relative_path)
+
 def setup_runtime_paths():
     """在源码或打包环境下，自动定位 VLC 和 FFmpeg 并设置环境变量（支持 Windows / macOS）"""
+    # ----- 首先判断打包模式 -----
     if getattr(sys, 'frozen', False):
-        base = sys._MEIPASS
+        if hasattr(sys, '_MEIPASS'):
+            # PyInstaller 模式
+            base = sys._MEIPASS
+        else:
+            # Nuitka 模式，可执行文件所在目录（或 Resources）
+            base = os.path.dirname(sys.executable)
+            if sys.platform == 'darwin' and base.endswith('MacOS'):
+                base = os.path.join(base, '..', 'Resources')
     else:
-        # 【修改点】使用主入口文件所在目录，而不是当前模块所在目录
+        # 开发模式
         base = os.path.dirname(os.path.abspath(sys.argv[0]))
-
+    
     # ---------- VLC ----------
     vlc_dir = None
     candidates = [
         base,
         os.path.join(base, 'vlc'),
         os.path.join(base, 'VLC'),
+        os.path.join(base, 'resources', 'vlc'),   # Nuitka 中我们把资源放在 resources/vlc
     ]
-    if os.path.exists(os.path.join(base, 'libvlc.dll')) or os.path.exists(os.path.join(base, 'libvlc.dylib')):
-        candidates.append(base)
-
+    # 如果根目录有 libvlc 库文件，直接作为候选
+    if sys.platform == 'win32':
+        if os.path.exists(os.path.join(base, 'libvlc.dll')):
+            candidates.append(base)
+    else:
+        if os.path.exists(os.path.join(base, 'libvlc.dylib')):
+            candidates.append(base)
+    
     for cand in candidates:
-        if sys.platform == 'win32':
-            if os.path.isdir(cand) and os.path.exists(os.path.join(cand, 'libvlc.dll')):
+        if os.path.isdir(cand):
+            if sys.platform == 'win32' and os.path.exists(os.path.join(cand, 'libvlc.dll')):
                 vlc_dir = cand
                 break
-        else:  # macOS / Linux
-            if os.path.isdir(cand) and (os.path.exists(os.path.join(cand, 'libvlc.dylib')) or
-                                        os.path.exists(os.path.join(cand, 'libvlc.so'))):
+            elif sys.platform == 'darwin' and os.path.exists(os.path.join(cand, 'libvlc.dylib')):
                 vlc_dir = cand
                 break
-
+            elif sys.platform.startswith('linux') and os.path.exists(os.path.join(cand, 'libvlc.so')):
+                vlc_dir = cand
+                break
+    
+    # 如果没找到，尝试系统路径（brew 等）
     if vlc_dir is None and sys.platform == 'darwin':
-        vlc_app_lib = '/Applications/VLC.app/Contents/MacOS/lib'
-        if os.path.exists(os.path.join(vlc_app_lib, 'libvlc.dylib')):
-            vlc_dir = vlc_app_lib
+        # 尝试 /Applications/VLC.app
+        vlc_app = '/Applications/VLC.app/Contents/MacOS'
+        if os.path.exists(os.path.join(vlc_app, 'libvlc.dylib')):
+            vlc_dir = vlc_app
         else:
             try:
                 import subprocess
                 prefix = subprocess.check_output(['brew', '--prefix', 'vlc'], text=True).strip()
-                vlc_brew_lib = os.path.join(prefix, 'lib')
-                if os.path.exists(os.path.join(vlc_brew_lib, 'libvlc.dylib')):
-                    vlc_dir = vlc_brew_lib
-            except Exception:
+                brew_lib = os.path.join(prefix, 'lib')
+                if os.path.exists(os.path.join(brew_lib, 'libvlc.dylib')):
+                    vlc_dir = brew_lib
+            except:
                 pass
-
+    
     if vlc_dir:
         if sys.platform == 'win32':
             os.environ['PATH'] = vlc_dir + os.pathsep + os.environ.get('PATH', '')
             if hasattr(os, 'add_dll_directory'):
                 try:
                     os.add_dll_directory(vlc_dir)
-                except Exception:
+                except:
                     pass
+            # 查找 plugins 子目录
             plugin_dir = os.path.join(vlc_dir, 'plugins')
+            if not os.path.isdir(plugin_dir):
+                # 也许 plugins 在上级目录？但我们不处理，直接设为环境变量
+                pass
             if os.path.isdir(plugin_dir):
                 os.environ['VLC_PLUGIN_PATH'] = plugin_dir
         else:
-            lib_path = os.environ.get('DYLD_FALLBACK_LIBRARY_PATH', '')
+            # macOS / Linux 设置库路径
+            lib_path = os.environ.get('DYLD_FALLBACK_LIBRARY_PATH' if sys.platform == 'darwin' else 'LD_LIBRARY_PATH', '')
             if lib_path:
-                os.environ['DYLD_FALLBACK_LIBRARY_PATH'] = vlc_dir + os.pathsep + lib_path
+                os.environ['DYLD_FALLBACK_LIBRARY_PATH' if sys.platform == 'darwin' else 'LD_LIBRARY_PATH'] = vlc_dir + os.pathsep + lib_path
             else:
-                os.environ['DYLD_FALLBACK_LIBRARY_PATH'] = vlc_dir
+                os.environ['DYLD_FALLBACK_LIBRARY_PATH' if sys.platform == 'darwin' else 'LD_LIBRARY_PATH'] = vlc_dir
+            # plugins
             plugin_dir = os.path.join(vlc_dir, 'plugins')
             if not os.path.isdir(plugin_dir):
+                # 尝试上级目录（如在打包环境下）
                 parent = os.path.dirname(vlc_dir)
                 if os.path.isdir(os.path.join(parent, 'plugins')):
                     plugin_dir = os.path.join(parent, 'plugins')
@@ -83,20 +131,26 @@ def setup_runtime_paths():
                 os.environ['VLC_PLUGIN_PATH'] = plugin_dir
 
     # ---------- FFmpeg ----------
+    # 类似地，查找 ffmpeg 可执行文件
     ffmpeg_bin = None
     ffmpeg_lib = None
-    for cand in [os.path.join(base, 'ffmpeg', 'bin'), os.path.join(base, 'ffmpeg')]:
-        if os.path.isdir(cand):
-            if sys.platform == 'win32':
-                if os.path.exists(os.path.join(cand, 'ffmpeg.exe')):
-                    ffmpeg_bin = cand
-                    ffmpeg_lib = os.path.join(os.path.dirname(cand), 'lib') if os.path.isdir(os.path.join(os.path.dirname(cand), 'lib')) else None
-                    break
-            else:
-                if os.path.exists(os.path.join(cand, 'ffmpeg')):
-                    ffmpeg_bin = cand
-                    ffmpeg_lib = os.path.join(os.path.dirname(cand), 'lib') if os.path.isdir(os.path.join(os.path.dirname(cand), 'lib')) else None
-                    break
+    # 在 Nuitka 中，我们把 ffmpeg 放在 resources/ffmpeg/bin
+    ffmpeg_candidates = [
+        os.path.join(base, 'ffmpeg'),
+        os.path.join(base, 'ffmpeg', 'bin'),
+        os.path.join(base, 'resources', 'ffmpeg', 'bin'),
+    ]
+    for cand in ffmpeg_candidates:
+        if sys.platform == 'win32':
+            if os.path.isdir(cand) and os.path.exists(os.path.join(cand, 'ffmpeg.exe')):
+                ffmpeg_bin = cand
+                ffmpeg_lib = os.path.join(os.path.dirname(cand), 'lib') if os.path.isdir(os.path.join(os.path.dirname(cand), 'lib')) else None
+                break
+        else:
+            if os.path.isdir(cand) and os.path.exists(os.path.join(cand, 'ffmpeg')):
+                ffmpeg_bin = cand
+                ffmpeg_lib = os.path.join(os.path.dirname(cand), 'lib') if os.path.isdir(os.path.join(os.path.dirname(cand), 'lib')) else None
+                break
 
     if ffmpeg_bin is None and sys.platform == 'darwin':
         try:
@@ -107,9 +161,9 @@ def setup_runtime_paths():
             if os.path.exists(os.path.join(brew_bin, 'ffmpeg')):
                 ffmpeg_bin = brew_bin
                 ffmpeg_lib = brew_lib
-        except Exception:
+        except:
             pass
-
+    
     if ffmpeg_bin:
         os.environ['PATH'] = ffmpeg_bin + os.pathsep + os.environ.get('PATH', '')
         ffmpeg_exe = os.path.join(ffmpeg_bin, 'ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg')

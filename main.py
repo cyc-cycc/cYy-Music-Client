@@ -9,6 +9,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 # ===== 必须先设置运行时路径，再导入可能依赖 VLC 的模块 =====
+from utils import get_resource_path
 from utils import setup_runtime_paths
 setup_runtime_paths()
 
@@ -110,11 +111,8 @@ class MusicdlGUI(QWidget):
 
         icon_label = QLabel()
         try:
-            if getattr(sys, 'frozen', False):
-                base_dir = sys._MEIPASS
-            else:
-                base_dir = os.path.dirname(os.path.abspath(__file__))
-            icon_path = os.path.join(base_dir, 'icon.ico')
+            # 直接使用统一函数
+            icon_path = get_resource_path('icon.ico')
             if os.path.exists(icon_path):
                 icon = QIcon(icon_path)
                 self.setWindowIcon(icon)
@@ -124,14 +122,8 @@ class MusicdlGUI(QWidget):
                 if app:
                     app.setWindowIcon(icon)
             else:
-                if getattr(sys, 'frozen', False):
-                    alt_path = os.path.join(os.path.dirname(sys.executable), 'icon.ico')
-                    if os.path.exists(alt_path):
-                        icon = QIcon(alt_path)
-                        self.setWindowIcon(icon)
-                        app = QApplication.instance()
-                        if app:
-                            app.setWindowIcon(icon)
+                # 如果找不到，尝试备用路径（根据打包环境）
+                pass
         except Exception:
             pass
         icon_label.setFixedSize(24, 24)
