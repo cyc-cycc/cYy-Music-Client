@@ -13,117 +13,68 @@ import filetype
 
 from constants import DATA_DIR, LOG_DIR, LOG_FILE, DEFAULT_SAVE_DIR
 
-# ==================== 资源路径查找工具 ====================
-def get_resource_path(relative_path: str) -> str:
-    """
-    在打包环境下（PyInstaller / Nuitka）返回资源的绝对路径。
-    开发环境下返回相对于当前文件的路径。
-    """
-    if getattr(sys, 'frozen', False):
-        # ----- PyInstaller 模式 -----
-        if hasattr(sys, '_MEIPASS'):
-            base = sys._MEIPASS
-        # ----- Nuitka 模式（standalone） -----
-        else:
-            # 在 macOS .app 中，可执行文件位于 .app/Contents/MacOS/
-            # 资源通常放在 .app/Contents/Resources/ 或与可执行文件同级
-            base = os.path.dirname(sys.executable)
-            # 如果可执行文件在 MacOS 目录下，资源在上级 Resources 目录
-            if sys.platform == 'darwin' and base.endswith('MacOS'):
-                base = os.path.join(base, '..', 'Resources')
-            # 如果是其他平台（Linux）可能在同一目录，暂不额外处理
-    else:
-        # ----- 开发模式（源码运行）-----
-        base = os.path.dirname(os.path.abspath(__file__))
-    
-    return os.path.join(base, relative_path)
-
+# ==================== 运行时路径设置 ====================
 def setup_runtime_paths():
     """在源码或打包环境下，自动定位 VLC 和 FFmpeg 并设置环境变量（支持 Windows / macOS）"""
-    # ----- 首先判断打包模式 -----
     if getattr(sys, 'frozen', False):
-        if hasattr(sys, '_MEIPASS'):
-            # PyInstaller 模式
-            base = sys._MEIPASS
-        else:
-            # Nuitka 模式，可执行文件所在目录（或 Resources）
-            base = os.path.dirname(sys.executable)
-            if sys.platform == 'darwin' and base.endswith('MacOS'):
-                base = os.path.join(base, '..', 'Resources')
+        base = sys._MEIPASS
     else:
-        # 开发模式
         base = os.path.dirname(os.path.abspath(sys.argv[0]))
-    
+
     # ---------- VLC ----------
     vlc_dir = None
     candidates = [
         base,
         os.path.join(base, 'vlc'),
         os.path.join(base, 'VLC'),
-        os.path.join(base, 'resources', 'vlc'),   # Nuitka 中我们把资源放在 resources/vlc
     ]
-    # 如果根目录有 libvlc 库文件，直接作为候选
-    if sys.platform == 'win32':
-        if os.path.exists(os.path.join(base, 'libvlc.dll')):
-            candidates.append(base)
-    else:
-        if os.path.exists(os.path.join(base, 'libvlc.dylib')):
-            candidates.append(base)
-    
+    if os.path.exists(os.path.join(base, 'libvlc.dll')) or os.path.exists(os.path.join(base, 'libvlc.dylib')):
+        candidates.append(base)
+
     for cand in candidates:
-        if os.path.isdir(cand):
-            if sys.platform == 'win32' and os.path.exists(os.path.join(cand, 'libvlc.dll')):
+        if sys.platform == 'win32':
+            if os.path.isdir(cand) and os.path.exists(os.path.join(cand, 'libvlc.dll')):
                 vlc_dir = cand
                 break
-            elif sys.platform == 'darwin' and os.path.exists(os.path.join(cand, 'libvlc.dylib')):
+        else:  # macOS / Linux
+            if os.path.isdir(cand) and (os.path.exists(os.path.join(cand, 'libvlc.dylib')) or
+                                        os.path.exists(os.path.join(cand, 'libvlc.so'))):
                 vlc_dir = cand
                 break
-            elif sys.platform.startswith('linux') and os.path.exists(os.path.join(cand, 'libvlc.so')):
-                vlc_dir = cand
-                break
-    
-    # 如果没找到，尝试系统路径（brew 等）
+
     if vlc_dir is None and sys.platform == 'darwin':
-        # 尝试 /Applications/VLC.app
-        vlc_app = '/Applications/VLC.app/Contents/MacOS'
-        if os.path.exists(os.path.join(vlc_app, 'libvlc.dylib')):
-            vlc_dir = vlc_app
+        vlc_app_lib = '/Applications/VLC.app/Contents/MacOS/lib'
+        if os.path.exists(os.path.join(vlc_app_lib, 'libvlc.dylib')):
+            vlc_dir = vlc_app_lib
         else:
             try:
                 import subprocess
                 prefix = subprocess.check_output(['brew', '--prefix', 'vlc'], text=True).strip()
-                brew_lib = os.path.join(prefix, 'lib')
-                if os.path.exists(os.path.join(brew_lib, 'libvlc.dylib')):
-                    vlc_dir = brew_lib
-            except:
+                vlc_brew_lib = os.path.join(prefix, 'lib')
+                if os.path.exists(os.path.join(vlc_brew_lib, 'libvlc.dylib')):
+                    vlc_dir = vlc_brew_lib
+            except Exception:
                 pass
-    
+
     if vlc_dir:
         if sys.platform == 'win32':
             os.environ['PATH'] = vlc_dir + os.pathsep + os.environ.get('PATH', '')
             if hasattr(os, 'add_dll_directory'):
                 try:
                     os.add_dll_directory(vlc_dir)
-                except:
+                except Exception:
                     pass
-            # 查找 plugins 子目录
             plugin_dir = os.path.join(vlc_dir, 'plugins')
-            if not os.path.isdir(plugin_dir):
-                # 也许 plugins 在上级目录？但我们不处理，直接设为环境变量
-                pass
             if os.path.isdir(plugin_dir):
                 os.environ['VLC_PLUGIN_PATH'] = plugin_dir
         else:
-            # macOS / Linux 设置库路径
-            lib_path = os.environ.get('DYLD_FALLBACK_LIBRARY_PATH' if sys.platform == 'darwin' else 'LD_LIBRARY_PATH', '')
+            lib_path = os.environ.get('DYLD_FALLBACK_LIBRARY_PATH', '')
             if lib_path:
-                os.environ['DYLD_FALLBACK_LIBRARY_PATH' if sys.platform == 'darwin' else 'LD_LIBRARY_PATH'] = vlc_dir + os.pathsep + lib_path
+                os.environ['DYLD_FALLBACK_LIBRARY_PATH'] = vlc_dir + os.pathsep + lib_path
             else:
-                os.environ['DYLD_FALLBACK_LIBRARY_PATH' if sys.platform == 'darwin' else 'LD_LIBRARY_PATH'] = vlc_dir
-            # plugins
+                os.environ['DYLD_FALLBACK_LIBRARY_PATH'] = vlc_dir
             plugin_dir = os.path.join(vlc_dir, 'plugins')
             if not os.path.isdir(plugin_dir):
-                # 尝试上级目录（如在打包环境下）
                 parent = os.path.dirname(vlc_dir)
                 if os.path.isdir(os.path.join(parent, 'plugins')):
                     plugin_dir = os.path.join(parent, 'plugins')
@@ -131,26 +82,20 @@ def setup_runtime_paths():
                 os.environ['VLC_PLUGIN_PATH'] = plugin_dir
 
     # ---------- FFmpeg ----------
-    # 类似地，查找 ffmpeg 可执行文件
     ffmpeg_bin = None
     ffmpeg_lib = None
-    # 在 Nuitka 中，我们把 ffmpeg 放在 resources/ffmpeg/bin
-    ffmpeg_candidates = [
-        os.path.join(base, 'ffmpeg'),
-        os.path.join(base, 'ffmpeg', 'bin'),
-        os.path.join(base, 'resources', 'ffmpeg', 'bin'),
-    ]
-    for cand in ffmpeg_candidates:
-        if sys.platform == 'win32':
-            if os.path.isdir(cand) and os.path.exists(os.path.join(cand, 'ffmpeg.exe')):
-                ffmpeg_bin = cand
-                ffmpeg_lib = os.path.join(os.path.dirname(cand), 'lib') if os.path.isdir(os.path.join(os.path.dirname(cand), 'lib')) else None
-                break
-        else:
-            if os.path.isdir(cand) and os.path.exists(os.path.join(cand, 'ffmpeg')):
-                ffmpeg_bin = cand
-                ffmpeg_lib = os.path.join(os.path.dirname(cand), 'lib') if os.path.isdir(os.path.join(os.path.dirname(cand), 'lib')) else None
-                break
+    for cand in [os.path.join(base, 'ffmpeg', 'bin'), os.path.join(base, 'ffmpeg')]:
+        if os.path.isdir(cand):
+            if sys.platform == 'win32':
+                if os.path.exists(os.path.join(cand, 'ffmpeg.exe')):
+                    ffmpeg_bin = cand
+                    ffmpeg_lib = os.path.join(os.path.dirname(cand), 'lib') if os.path.isdir(os.path.join(os.path.dirname(cand), 'lib')) else None
+                    break
+            else:
+                if os.path.exists(os.path.join(cand, 'ffmpeg')):
+                    ffmpeg_bin = cand
+                    ffmpeg_lib = os.path.join(os.path.dirname(cand), 'lib') if os.path.isdir(os.path.join(os.path.dirname(cand), 'lib')) else None
+                    break
 
     if ffmpeg_bin is None and sys.platform == 'darwin':
         try:
@@ -161,9 +106,9 @@ def setup_runtime_paths():
             if os.path.exists(os.path.join(brew_bin, 'ffmpeg')):
                 ffmpeg_bin = brew_bin
                 ffmpeg_lib = brew_lib
-        except:
+        except Exception:
             pass
-    
+
     if ffmpeg_bin:
         os.environ['PATH'] = ffmpeg_bin + os.pathsep + os.environ.get('PATH', '')
         ffmpeg_exe = os.path.join(ffmpeg_bin, 'ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg')
@@ -300,3 +245,371 @@ except ImportError:
         # 简单替换非法字符
         illegal_chars = r'[\\/:*?"<>|]'
         return re.sub(illegal_chars, '_', filename)
+
+# ==================== 依赖检查工具 ====================
+def check_vlc() -> bool:
+    """检查 VLC 是否可用（尝试导入 vlc 并创建实例）"""
+    try:
+        import vlc
+        inst = vlc.Instance('--verbose=0')
+        return True
+    except Exception:
+        return False
+
+def check_dependencies():
+    """返回依赖状态，仅检测 VLC（FFmpeg 和 PortAudio 已内置）"""
+    return {
+        'vlc': check_vlc(),
+    }
+
+# ==================== 全局样式表 ====================
+def get_global_stylesheet():
+    return """
+    /* 基础字体和全局背景 */
+    QWidget {
+        font-family: "Microsoft YaHei", "PingFang SC", "Helvetica Neue", "Segoe UI", sans-serif;
+        font-size: 12px;
+    }
+
+    /* 主窗口（通过 objectName 匹配） */
+    #musicdlGUI {
+        background-color: #F5F7FA;
+        border-radius: 8px;
+    }
+
+    /* 标题栏 */
+    #titleBar {
+        background-color: #E8F0FE;
+        border-top-left-radius: 8px;
+        border-top-right-radius: 8px;
+        border-bottom: 1px solid #BDC3C7;
+    }
+    #titleBar QLabel {
+        background: transparent;
+        font-size: 14px;
+    }
+
+    /* 标题栏按钮 */
+    #titleSearchButton, #titleSettingsButton, #titleAboutButton {
+        background-color: transparent;
+        border: none;
+        border-radius: 4px;
+        font-size: 16px;
+        color: #2C3E50;
+    }
+    #titleSearchButton:hover, #titleSettingsButton:hover, #titleAboutButton:hover {
+        background-color: #D5D8DC;
+    }
+    #titleMinButton, #titleMaxButton, #titleCloseButton {
+        background-color: transparent;
+        border: none;
+        border-radius: 4px;
+        font-size: 16px;
+        font-weight: bold;
+        color: #2C3E50;
+    }
+    #titleMinButton:hover { background-color: #D5D8DC; }
+    #titleMaxButton:hover { background-color: #D5D8DC; }
+    #titleCloseButton:hover { background-color: #E74C3C; color: white; }
+
+    /* 内容区域 */
+    #contentWidget {
+        background-color: rgba(200, 225, 245, 240);
+        border-bottom-left-radius: 8px;
+        border-bottom-right-radius: 8px;
+    }
+
+    /* 分组框 */
+    QGroupBox {
+        font-weight: bold;
+        border: 1px solid #BDC3C7;
+        border-radius: 5px;
+        margin-top: 10px;
+        padding-top: 10px;
+    }
+    QGroupBox::title {
+        subcontrol-origin: margin;
+        left: 10px;
+        padding: 0 5px;
+        color: #2C3E50;
+    }
+    QGroupBox#playGroup {
+        background-color: #E8F0FE;
+        border-color: #4A90D9;
+    }
+
+    /* 通用标签 */
+    QLabel { color: #2C3E50; }
+
+    /* 复选框 */
+    QCheckBox { color: #2C3E50; spacing: 5px; }
+    QCheckBox::indicator { width: 16px; height: 16px; }
+
+    /* 输入框、数字框、下拉框 */
+    QLineEdit, QSpinBox, QComboBox {
+        background-color: white;
+        border: 1px solid #BDC3C7;
+        border-radius: 5px;
+        padding: 5px;
+        color: #2C3E50;
+    }
+    QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
+        border: 1px solid #4A90D9;
+    }
+
+    /* 按钮基础 */
+    QPushButton {
+        background-color: #E8EDF2;
+        color: #2C3E50;
+        border: 1px solid #BDC3C7;
+        border-radius: 4px;
+        padding: 4px 10px;
+    }
+    QPushButton:hover { background-color: #D5D8DC; }
+
+    /* 特殊功能按钮（通过 objectName） */
+    QPushButton#playButton {
+        background-color: #4A90D9;
+        color: white;
+        font-weight: bold;
+        border: none;
+    }
+    QPushButton#playButton:hover { background-color: #357ABD; }
+
+    QPushButton#stopButton {
+        background-color: #E67E22;
+        color: white;
+        font-weight: bold;
+        border: none;
+    }
+    QPushButton#stopButton:hover { background-color: #D35400; }
+
+    QPushButton#prevButton, QPushButton#nextButton {
+        background-color: #5DADE2;
+        color: white;
+        font-weight: bold;
+        border: none;
+        border-radius: 4px;
+    }
+    QPushButton#prevButton:hover, QPushButton#nextButton:hover {
+        background-color: #3498DB;
+    }
+
+    QPushButton#visualizeButton {
+        background-color: #8E44AD;
+        color: white;
+        font-weight: bold;
+        border: none;
+        border-radius: 4px;
+    }
+    QPushButton#visualizeButton:hover { background-color: #6C3483; }
+
+    QPushButton#parsePlaylistButton {
+        background-color: #8E44AD;
+        color: white;
+        font-weight: bold;
+        border: none;
+        border-radius: 4px;
+    }
+    QPushButton#parsePlaylistButton:hover { background-color: #6C3483; }
+
+    /* 表格（虽然未使用，但保留兼容） */
+    QTableWidget#resultTable {
+        background-color: white;
+        alternate-background-color: #ECF0F1;
+        border: 1px solid #BDC3C7;
+        border-radius: 5px;
+        gridline-color: #D5D8DC;
+    }
+    QTableWidget::item { padding: 4px; color: #2C3E50; }
+    QTableWidget::item:selected { background-color: #4A90D9; color: white; }
+    QHeaderView::section {
+        background-color: #4A90D9;
+        color: white;
+        padding: 5px;
+        border: none;
+    }
+
+    /* 进度条 */
+    QProgressBar {
+        border: 1px solid #BDC3C7;
+        border-radius: 5px;
+        background-color: white;
+        text-align: center;
+        color: #2C3E50;
+        font-weight: bold;
+    }
+    QProgressBar::chunk {
+        background-color: #4A90D9;
+        border-radius: 5px;
+    }
+
+    /* 状态标签 */
+    QLabel#statsLabel {
+        color: #1E88E5;
+        font-weight: bold;
+        font-size: 13px;
+        background-color: rgba(74, 144, 217, 0.1);
+        border-radius: 5px;
+        padding: 4px;
+    }
+
+    /* 右键菜单 */
+    QMenu {
+        background-color: white;
+        border: 1px solid #BDC3C7;
+        border-radius: 5px;
+    }
+    QMenu::item {
+        padding: 6px 20px;
+        color: #2C3E50;
+    }
+    QMenu::item:selected {
+        background-color: #4A90D9;
+        color: white;
+    }
+
+    /* 滑块 */
+    QSlider::groove:horizontal {
+        height: 6px;
+        background: #D5D8DC;
+        border-radius: 3px;
+    }
+    QSlider::handle:horizontal {
+        background: #4A90D9;
+        width: 14px;
+        height: 14px;
+        margin: -4px 0;
+        border-radius: 7px;
+    }
+    QSlider::sub-page:horizontal {
+        background: #4A90D9;
+        border-radius: 3px;
+    }
+
+    /* 列表控件（结果列表） */
+    QListWidget {
+        background-color: transparent;
+        border: none;
+        outline: none;
+    }
+    QListWidget::item {
+        padding: 2px 5px;
+    }
+    /* 卡片式列表的选中状态由卡片自己控制，这里不干扰 */
+    QListWidget::item:selected {
+        background: transparent;
+    }
+
+    /* ==================== 新增补充样式 ==================== */
+
+    /* 标签页 */
+    QTabWidget::pane {
+        border: 1px solid #BDC3C7;
+        border-radius: 5px;
+        background: white;
+    }
+    QTabBar::tab {
+        background: #E8EDF2;
+        color: #2C3E50;
+        padding: 8px 16px;
+        margin-right: 2px;
+        border-top-left-radius: 4px;
+        border-top-right-radius: 4px;
+        border: 1px solid #BDC3C7;
+        border-bottom: none;
+    }
+    QTabBar::tab:selected {
+        background: #4A90D9;
+        color: white;
+    }
+    QTabBar::tab:hover:!selected {
+        background: #D5D8DC;
+    }
+
+    /* 对话框 */
+    QDialog {
+        background: #F5F7FA;
+        border-radius: 8px;
+    }
+
+    /* 数字输入框的箭头按钮 */
+    QSpinBox::up-button, QSpinBox::down-button {
+        background: #E8EDF2;
+        border: none;
+        border-radius: 2px;
+        width: 16px;
+    }
+    QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+        background: #D5D8DC;
+    }
+
+    /* 下拉框的下拉按钮 */
+    QComboBox::drop-down {
+        subcontrol-origin: padding;
+        subcontrol-position: top right;
+        width: 20px;
+        border-left: 1px solid #BDC3C7;
+        border-top-right-radius: 5px;
+        border-bottom-right-radius: 5px;
+        background: #E8EDF2;
+    }
+    QComboBox::down-arrow {
+        /* 使用 Unicode 箭头或图片，这里用默认 */
+        width: 12px;
+        height: 12px;
+    }
+    QComboBox QAbstractItemView {
+        border: 1px solid #BDC3C7;
+        border-radius: 5px;
+        background: white;
+        selection-background-color: #4A90D9;
+        selection-color: white;
+    }
+
+    /* 滚动条（垂直/水平） */
+    QScrollBar:vertical {
+        background: transparent;
+        width: 8px;
+        margin: 0px;
+    }
+    QScrollBar::handle:vertical {
+        background: rgba(160, 160, 160, 180);
+        border-radius: 4px;
+        min-height: 20px;
+    }
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+        height: 0px;
+        background: transparent;
+    }
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+        background: transparent;
+    }
+
+    QScrollBar:horizontal {
+        background: transparent;
+        height: 8px;
+        margin: 0px;
+    }
+    QScrollBar::handle:horizontal {
+        background: rgba(160, 160, 160, 180);
+        border-radius: 4px;
+        min-width: 20px;
+    }
+    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+        width: 0px;
+        background: transparent;
+    }
+    QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+        background: transparent;
+    }
+
+    /* 工具提示 */
+    QToolTip {
+        background: #2C3E50;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        padding: 4px;
+    }
+    """

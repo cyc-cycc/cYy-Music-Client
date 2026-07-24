@@ -7,26 +7,7 @@ APP_NAME = 'cYy-Music-Client_macos-arm64'   # 最终 .app 名称
 EXE_NAME = APP_NAME + '_bin'
 ICON_PATH = 'icon.icns'                     # 请确保此文件存在
 
-# ----- 查找 VLC -----
-VLC_LIB_DIR = '/Applications/VLC.app/Contents/MacOS/lib'
-VLC_PLUGINS_DIR = '/Applications/VLC.app/Contents/MacOS/plugins'
-if not (os.path.exists(VLC_LIB_DIR) and os.path.exists(VLC_PLUGINS_DIR)):
-    try:
-        prefix = subprocess.check_output(['brew', '--prefix', 'vlc'], text=True).strip()
-        if prefix:
-            VLC_LIB_DIR = os.path.join(prefix, 'lib')
-            VLC_PLUGINS_DIR = os.path.join(prefix, 'plugins')
-    except:
-        pass
-if not (os.path.exists(VLC_LIB_DIR) and os.path.exists(VLC_PLUGINS_DIR)):
-    raise RuntimeError('VLC not found.')
-
-libvlc = os.path.join(VLC_LIB_DIR, 'libvlc.dylib')
-libvlccore = os.path.join(VLC_LIB_DIR, 'libvlccore.dylib')
-if not (os.path.exists(libvlc) and os.path.exists(libvlccore)):
-    raise RuntimeError('VLC libs missing.')
-
-# ----- 查找 ffmpeg -----
+# ----- 查找 ffmpeg (macOS 通过 Homebrew) -----
 def find_ffmpeg():
     try:
         prefix = subprocess.check_output(['brew', '--prefix', 'ffmpeg'], text=True).strip()
@@ -45,16 +26,13 @@ ffmpeg_lib = os.path.join(FFMPEG_PREFIX, 'lib')
 if not os.path.exists(os.path.join(ffmpeg_bin, 'ffmpeg')):
     raise RuntimeError('ffmpeg executable not found.')
 
-# ----- 构建 datas -----
+# ----- 构建 datas（不包含 VLC，只包含 FFmpeg 和 PortAudio）-----
 datas = [
-    (libvlc, 'vlc'),
-    (libvlccore, 'vlc'),
-    (VLC_PLUGINS_DIR, 'vlc/plugins'),
     (ffmpeg_bin, 'ffmpeg/bin'),
     (ffmpeg_lib, 'ffmpeg/lib'),
 ]
 
-# ----- 查找 portaudio (sounddevice 依赖) -----
+# 查找 portaudio (sounddevice 依赖)
 PORT_AUDIO_LIB = None
 for p in ['/usr/local/lib/libportaudio.dylib', '/opt/homebrew/lib/libportaudio.dylib']:
     if os.path.exists(p):
@@ -65,9 +43,13 @@ if PORT_AUDIO_LIB:
 else:
     print("Warning: libportaudio.dylib not found, sounddevice may fail.")
 
+# 添加图标（若有）
+if os.path.exists(ICON_PATH):
+    datas.append((ICON_PATH, '.'))
+
 # ----- 分析 -----
 a = Analysis(
-    ['main.py'],                         # 入口文件改为 main.py
+    ['main.py'],
     pathex=[],
     binaries=[],
     datas=datas,
@@ -85,8 +67,8 @@ a = Analysis(
         'requests',
         'filetype',
         'musicdl',
-        'vlc',
-        'PyQt5.sip',                     # 确保 PyQt5 相关隐式导入
+        'vlc',            # 保留，因为代码中会导入，但运行时依赖系统 VLC
+        'PyQt5.sip',
     ],
     hookspath=[],
     runtime_hooks=[],
@@ -143,11 +125,11 @@ exe = EXE(
     name=EXE_NAME,
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,               # macOS 下 strip 可用，但为减少体积可选，有时会报错，故关闭
-    upx=False,                 # macOS 上 UPX 支持有限，关闭
+    strip=False,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,             # 无控制台窗口
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

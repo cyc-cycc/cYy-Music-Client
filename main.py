@@ -9,8 +9,8 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 # ===== 必须先设置运行时路径，再导入可能依赖 VLC 的模块 =====
-from utils import get_resource_path
 from utils import setup_runtime_paths
+from utils import get_global_stylesheet
 setup_runtime_paths()
 
 # ===== 导入常量 =====
@@ -65,7 +65,6 @@ class MusicdlGUI(QWidget):
         self.setMinimumSize(1450, 900)
         self.resize(1450, 900)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setStyleSheet(self.get_style_sheet())
 
         self.playlist = []
         self.current_play_index = -1
@@ -99,6 +98,40 @@ class MusicdlGUI(QWidget):
             'download_lyric': True,
             'download_cover': True
         }
+        QTimer.singleShot(100, self._check_deps)
+
+    def _check_deps(self):
+        from utils import check_dependencies
+        deps = check_dependencies()
+        if not deps['vlc']:
+            msg = (
+                "未检测到 VLC 媒体播放器。\n\n"
+                "播放功能需要 VLC。\n"
+                "建议使用 Homebrew 安装：\n"
+                "   brew install vlc\n"
+                "或者从官网下载:\n"
+                "   https://www.videolan.org/vlc/download-macosx.html\n\n"
+                "安装后请重启应用。\n\n"
+                "是否继续？（播放相关功能将被禁用）"
+            )
+            reply = QMessageBox.question(
+                self, "VLC 缺失",
+                msg,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.No:
+                self.close()
+                return
+
+            # 禁用播放控件
+            self.btn_play.setEnabled(False)
+            self.btn_prev.setEnabled(False)
+            self.btn_next.setEnabled(False)
+            self.btn_stop.setEnabled(False)
+            self.slider_position.setEnabled(False)
+            self.label_time.setText("VLC 不可用")
+        # 其他功能（下载、可视化）不受影响
 
     def setup_title_bar(self):
         self.title_bar = QWidget(self)
@@ -111,8 +144,11 @@ class MusicdlGUI(QWidget):
 
         icon_label = QLabel()
         try:
-            # 直接使用统一函数
-            icon_path = get_resource_path('icon.ico')
+            if getattr(sys, 'frozen', False):
+                base_dir = sys._MEIPASS
+            else:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+            icon_path = os.path.join(base_dir, 'icon.ico')
             if os.path.exists(icon_path):
                 icon = QIcon(icon_path)
                 self.setWindowIcon(icon)
@@ -122,8 +158,14 @@ class MusicdlGUI(QWidget):
                 if app:
                     app.setWindowIcon(icon)
             else:
-                # 如果找不到，尝试备用路径（根据打包环境）
-                pass
+                if getattr(sys, 'frozen', False):
+                    alt_path = os.path.join(os.path.dirname(sys.executable), 'icon.ico')
+                    if os.path.exists(alt_path):
+                        icon = QIcon(alt_path)
+                        self.setWindowIcon(icon)
+                        app = QApplication.instance()
+                        if app:
+                            app.setWindowIcon(icon)
         except Exception:
             pass
         icon_label.setFixedSize(24, 24)
@@ -399,206 +441,6 @@ class MusicdlGUI(QWidget):
         self.action_download.triggered.connect(self.download_selected)
 
         main_layout.addWidget(content_widget)
-
-    def get_style_sheet(self):
-        return """
-        QWidget {
-            font-family: "Microsoft YaHei", "PingFang SC", "Helvetica Neue", "Segoe UI", sans-serif;
-            font-size: 12px;
-        }
-        QWidget#musicdlGUI {
-            background-color: #F5F7FA;
-            border-radius: 8px;
-        }
-        #titleBar {
-            background-color: #E8F0FE;
-            border-top-left-radius: 8px;
-            border-top-right-radius: 8px;
-            border-bottom: 1px solid #BDC3C7;
-        }
-        #titleBar QLabel {
-            background: transparent;
-            font-size: 14px;
-        }
-        #titleSearchButton, #titleSettingsButton, #titleAboutButton {
-            background-color: transparent;
-            border: none;
-            border-radius: 4px;
-            font-size: 16px;
-            color: #2C3E50;
-        }
-        #titleSearchButton:hover, #titleSettingsButton:hover, #titleAboutButton:hover {
-            background-color: #D5D8DC;
-        }
-        #titleMinButton, #titleMaxButton, #titleCloseButton {
-            background-color: transparent;
-            border: none;
-            border-radius: 4px;
-            font-size: 16px;
-            font-weight: bold;
-            color: #2C3E50;
-        }
-        #titleMinButton:hover { background-color: #D5D8DC; }
-        #titleMaxButton:hover { background-color: #D5D8DC; }
-        #titleCloseButton:hover { background-color: #E74C3C; color: white; }
-        #contentWidget {
-            background-color: rgba(200, 225, 245, 240);
-            border-bottom-left-radius: 8px;
-            border-bottom-right-radius: 8px;
-        }
-        QGroupBox {
-            font-weight: bold;
-            border: 1px solid #BDC3C7;
-            border-radius: 5px;
-            margin-top: 10px;
-            padding-top: 10px;
-        }
-        QGroupBox::title {
-            subcontrol-origin: margin;
-            left: 10px;
-            padding: 0 5px;
-        }
-        QGroupBox#playGroup {
-            background-color: #E8F0FE;
-            border-color: #4A90D9;
-        }
-        QLabel { color: #2C3E50; }
-        QCheckBox { color: #2C3E50; spacing: 5px; }
-        QCheckBox::indicator { width: 16px; height: 16px; }
-        QLineEdit, QSpinBox, QComboBox {
-            background-color: white;
-            border: 1px solid #BDC3C7;
-            border-radius: 5px;
-            padding: 5px;
-            color: #2C3E50;
-        }
-        QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
-            border: 1px solid #4A90D9;
-        }
-        QPushButton {
-            background-color: #E8EDF2;
-            color: #2C3E50;
-            border: 1px solid #BDC3C7;
-            border-radius: 4px;
-            padding: 4px 10px;
-        }
-        QPushButton:hover { background-color: #D5D8DC; }
-        QPushButton#playButton {
-            background-color: #4A90D9;
-            color: white;
-            font-weight: bold;
-            border: none;
-        }
-        QPushButton#playButton:hover { background-color: #357ABD; }
-        QPushButton#stopButton {
-            background-color: #E67E22;
-            color: white;
-            font-weight: bold;
-            border: none;
-        }
-        QPushButton#stopButton:hover { background-color: #D35400; }
-        QPushButton#prevButton, QPushButton#nextButton {
-            background-color: #5DADE2;
-            color: white;
-            font-weight: bold;
-            border: none;
-            border-radius: 4px;
-        }
-        QPushButton#prevButton:hover, QPushButton#nextButton:hover {
-            background-color: #3498DB;
-        }
-        QPushButton#visualizeButton {
-            background-color: #8E44AD;
-            color: white;
-            font-weight: bold;
-            border: none;
-            border-radius: 4px;
-        }
-        QPushButton#visualizeButton:hover { background-color: #6C3483; }
-        QPushButton#parsePlaylistButton {
-            background-color: #8E44AD;
-            color: white;
-            font-weight: bold;
-            border: none;
-            border-radius: 4px;
-        }
-        QPushButton#parsePlaylistButton:hover { background-color: #6C3483; }
-        QTableWidget#resultTable {
-            background-color: white;
-            alternate-background-color: #ECF0F1;
-            border: 1px solid #BDC3C7;
-            border-radius: 5px;
-            gridline-color: #D5D8DC;
-        }
-        QTableWidget::item { padding: 4px; color: #2C3E50; }
-        QTableWidget::item:selected { background-color: #4A90D9; color: white; }
-        QHeaderView::section {
-            background-color: #4A90D9;
-            color: white;
-            padding: 5px;
-            border: none;
-        }
-        QProgressBar {
-            border: 1px solid #BDC3C7;
-            border-radius: 5px;
-            background-color: white;
-            text-align: center;
-            color: #2C3E50;
-            font-weight: bold;
-        }
-        QProgressBar::chunk {
-            background-color: #4A90D9;
-            border-radius: 5px;
-        }
-        QLabel#statsLabel {
-            color: #1E88E5;
-            font-weight: bold;
-            font-size: 13px;
-            background-color: rgba(74, 144, 217, 0.1);
-            border-radius: 5px;
-            padding: 4px;
-        }
-        QMenu {
-            background-color: white;
-            border: 1px solid #BDC3C7;
-            border-radius: 5px;
-        }
-        QMenu::item {
-            padding: 6px 20px;
-            color: #2C3E50;
-        }
-        QMenu::item:selected {
-            background-color: #4A90D9;
-            color: white;
-        }
-        QSlider::groove:horizontal {
-            height: 6px;
-            background: #D5D8DC;
-            border-radius: 3px;
-        }
-        QSlider::handle:horizontal {
-            background: #4A90D9;
-            width: 14px;
-            height: 14px;
-            margin: -4px 0;
-            border-radius: 7px;
-        }
-        QSlider::sub-page:horizontal {
-            background: #4A90D9;
-            border-radius: 3px;
-        }
-        QListWidget {
-            background-color: transparent;
-            border: none;
-            outline: none;
-        }
-        QListWidget::item {
-            padding: 2px 5px;
-        }
-        QListWidget::item:selected {
-            background: transparent;
-        }
-        """
 
     def _init_signals(self):
         self.button_parse_playlist.clicked.connect(self.parse_playlist)
@@ -1804,6 +1646,10 @@ if __name__ == '__main__':
     if sys.platform == 'darwin':
         font.setFamily("PingFang SC")
     app.setFont(font)
+
+    # 应用全局样式表
+    app.setStyleSheet(get_global_stylesheet())
+
     gui = MusicdlGUI()
     gui.show()
     sys.exit(app.exec_())
