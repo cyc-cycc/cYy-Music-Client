@@ -47,7 +47,7 @@ jobs:
           cp "$PORTAUDIO_LIB" resources/ffmpeg/lib/
         fi
 
-    - name: Build with Nuitka
+    - name: Build with Nuitka (verbose)
       run: |
         nuitka --standalone \
                --macos-create-app-bundle \
@@ -64,6 +64,8 @@ jobs:
                --include-data-dir=resources=resources \
                --output-dir=dist \
                --assume-yes-for-downloads \
+               --verbose \
+               --show-scons \
                --jobs=2 \
                main.py
 
