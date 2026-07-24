@@ -9,15 +9,16 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5  # 升级
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6  # 升级
       with:
         python-version: '3.10'
 
     - name: Install VLC, FFmpeg and PortAudio
       run: |
+        brew untap aws/tap || true
         brew install --cask vlc
         brew install ffmpeg portaudio
 
@@ -69,7 +70,7 @@ jobs:
         hdiutil create -volname "${APP_NAME}" -srcfolder dmg_staging -ov -format UDZO "dist/${APP_NAME}.dmg"
 
     - name: Upload DMG artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7  # 升级
       with:
         name: cYy-Music-Client-macOS
         path: dist/cYy-Music-Client_macos-arm64.dmg
