@@ -6,6 +6,7 @@ import subprocess
 APP_NAME = 'cYy-Music-Client_macos-arm64'   # 最终 .app 名称
 EXE_NAME = APP_NAME + '_bin'
 ICON_PATH = 'icon.icns'                     # 请确保此文件存在
+ICON = 'icon.ico'
 
 # ----- 查找 ffmpeg (macOS 通过 Homebrew) -----
 def find_ffmpeg():
@@ -47,7 +48,7 @@ else:
 if os.path.exists(ICON_PATH):
     datas.append((ICON_PATH, '.'))
 
-datas.append((icon.ico, '.'))
+datas.append((ICON, '.'))
 
 # ----- 分析 -----
 a = Analysis(
