@@ -47,6 +47,8 @@ else:
 if os.path.exists(ICON_PATH):
     datas.append((ICON_PATH, '.'))
 
+datas.append((icon.ico, '.'))
+
 # ----- 分析 -----
 a = Analysis(
     ['main.py'],

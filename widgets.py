@@ -247,22 +247,94 @@ class MarqueeLabel(QLabel):
             self._timer.start()
         super().leaveEvent(event)
 
-# ==================== 设置对话框 ====================
+# ==================== 设置对话框（带自定义标题栏） ====================
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("设置")
-        self.setMinimumSize(600, 250)
+        self.setWindowFlags(Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
         self.setModal(True)
-        self.init_ui()
+        self.setMinimumSize(620, 330)
+        self.resize(620, 330)
+        
+        # 拖拽相关
+        self.drag_pos = QPoint()
+        self.dragging = False
+        
+        self._init_ui()
         self.load_settings()
 
-    def init_ui(self):
-        layout = QVBoxLayout(self)
+    def _init_ui(self):
+        # 主布局（垂直）
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
+        # ---------- 标题栏 ----------
+        title_bar = QWidget()
+        title_bar.setObjectName("settingsTitleBar")  # 可单独样式，也可复用通用样式
+        title_bar.setFixedHeight(40)
+        title_bar.setStyleSheet("""
+            #settingsTitleBar {
+                background: #E8F0FE;
+                border-radius: 8px;
+                border-bottom: 1px solid #BDC3C7;
+            }
+        """)
+        # 鼠标事件绑定（拖动）
+        title_bar.mousePressEvent = self._title_mouse_press
+        title_bar.mouseMoveEvent = self._title_mouse_move
+        title_bar.mouseReleaseEvent = self._title_mouse_release
+
+        title_layout = QHBoxLayout(title_bar)
+        title_layout.setContentsMargins(10, 0, 10, 0)
+        title_layout.setSpacing(5)
+
+        # 图标（使用文本符号）
+        icon_label = QLabel("⚙️")
+        icon_label.setStyleSheet("font-size: 18px; background: transparent;")
+        title_layout.addWidget(icon_label)
+
+        # 标题
+        title_label = QLabel("设置")
+        title_label.setStyleSheet("color: #2C3E50; font-weight: bold; font-size: 14px; background: transparent;")
+        title_layout.addWidget(title_label)
+
+        title_layout.addStretch()
+
+        # ---------- 窗口控制按钮（仅关闭） ----------
+        self.btn_close = QPushButton("✕")
+        self.btn_close.setObjectName("titleCloseButton")
+        self.btn_close.setFixedSize(32, 32)
+        self.btn_close.clicked.connect(self.close)
+        title_layout.addWidget(self.btn_close)
+
+        main_layout.addWidget(title_bar)
+
+        # ---------- 内容区域（背景圆角） ----------
+        content_widget = QWidget()
+        content_widget.setObjectName("settingsContent")
+        content_widget.setStyleSheet("""
+            #settingsContent {
+                background: #F5F7FA;
+                border-radius: 8px;
+            }
+        """)
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(15, 15, 15, 15)
+        content_layout.setSpacing(10)
+
+        # 原有控件（标签页等）
+        self._create_content(content_layout)
+
+        main_layout.addWidget(content_widget)
+
+    def _create_content(self, parent_layout):
+        # 将原 init_ui 中的内容迁移到这里
         tabs = QTabWidget()
-        layout.addWidget(tabs)
+        parent_layout.addWidget(tabs)
 
+        # 搜索源标签页
         source_tab = QWidget()
         source_layout = QVBoxLayout(source_tab)
         group_layout = QHBoxLayout()
@@ -270,6 +342,7 @@ class SettingsDialog(QDialog):
 
         self.source_checkboxes = []
 
+        from constants import SOURCE_GROUPS  # 确保导入
         for group_name, source_names in SOURCE_GROUPS.items():
             group_box = QGroupBox(group_name)
             group_box.setFlat(True)
@@ -304,6 +377,7 @@ class SettingsDialog(QDialog):
         source_layout.addLayout(form_layout)
         tabs.addTab(source_tab, "搜索源")
 
+        # 下载设置标签页
         download_tab = QWidget()
         download_layout = QVBoxLayout(download_tab)
 
@@ -350,6 +424,7 @@ class SettingsDialog(QDialog):
 
         tabs.addTab(download_tab, "下载设置")
 
+        # 底部按钮
         btn_box = QHBoxLayout()
         btn_ok = QPushButton("确定")
         btn_ok.clicked.connect(self.accept)
@@ -358,8 +433,36 @@ class SettingsDialog(QDialog):
         btn_box.addStretch()
         btn_box.addWidget(btn_ok)
         btn_box.addWidget(btn_cancel)
-        layout.addLayout(btn_box)
+        parent_layout.addLayout(btn_box)
 
+    # ---------- 标题栏拖拽 ----------
+    def _title_mouse_press(self, event):
+        if event.button() == Qt.LeftButton:
+            self.drag_pos = event.globalPos()
+            self.dragging = True
+            event.accept()
+
+    def _title_mouse_move(self, event):
+        if self.dragging:
+            self.move(self.pos() + event.globalPos() - self.drag_pos)
+            self.drag_pos = event.globalPos()
+            event.accept()
+
+    def _title_mouse_release(self, event):
+        if event.button() == Qt.LeftButton:
+            self.dragging = False
+            event.accept()
+
+    # ---------- 最大化/还原 ----------
+    def _toggle_maximize(self):
+        if self.isMaximized():
+            self.showNormal()
+            self.btn_max.setText("□")
+        else:
+            self.showMaximized()
+            self.btn_max.setText("❐")
+
+    # ---------- 原有方法保持不变 ----------
     def browse_path(self):
         path = QFileDialog.getExistingDirectory(self, "选择保存目录", self.path_edit.text())
         if path:
@@ -372,9 +475,8 @@ class SettingsDialog(QDialog):
             self.format_custom_edit.hide()
 
     def load_settings(self):
-        if self.parent() and hasattr(self.parent(), 'settings'):
-            settings = self.parent().settings
-            pass
+        # 无需修改
+        pass
 
     def get_settings(self):
         selected_sources = [cb.text() for cb in self.source_checkboxes if cb.isChecked()]

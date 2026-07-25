@@ -280,8 +280,7 @@ def get_global_stylesheet():
     /* 标题栏 */
     #titleBar {
         background-color: #E8F0FE;
-        border-top-left-radius: 8px;
-        border-top-right-radius: 8px;
+        border-radius: 8px;
         border-bottom: 1px solid #BDC3C7;
     }
     #titleBar QLabel {
@@ -315,8 +314,7 @@ def get_global_stylesheet():
     /* 内容区域 */
     #contentWidget {
         background-color: rgba(200, 225, 245, 240);
-        border-bottom-left-radius: 8px;
-        border-bottom-right-radius: 8px;
+        border-radius: 8px;
     }
 
     /* 分组框 */

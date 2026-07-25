@@ -14,8 +14,8 @@ from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
 
-from PyQt5.QtCore import Qt, QTimer, QPoint, QObject, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QPixmap, QMouseEvent
+from PyQt5.QtCore import Qt, QTimer, QPoint, QObject, pyqtSignal, QRectF
+from PyQt5.QtGui import QColor, QFont, QPixmap, QMouseEvent, QPainterPath, QRegion
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QSlider, QListWidget, QListWidgetItem, QFileDialog,
@@ -27,7 +27,7 @@ class UpdateSignals(QObject):
 
 class AudioVisualizer(QMainWindow):
     def __init__(self, audio_path: str = None, lyric_path: str = None,
-                 cover_path: str = None, parent=None):
+                 cover_path: str = None, parent=None, initial_volume: int = 60):
         super().__init__(parent)
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -41,7 +41,7 @@ class AudioVisualizer(QMainWindow):
         self.read_index = 0
         self.lock = threading.Lock()
         self.paused = False
-        self.volume = 0.6
+        self.volume = initial_volume / 100
         self.stream = None
         self.lyrics = []
         self.current_lyric_index = -1
@@ -70,6 +70,7 @@ class AudioVisualizer(QMainWindow):
         self.timer.timeout.connect(self.signals.update_ui.emit)
         self.timer.start(30)
 
+        self.initial_volume = initial_volume
         self._init_ui()
 
         if audio_path and os.path.exists(audio_path):
@@ -77,7 +78,7 @@ class AudioVisualizer(QMainWindow):
 
     def _init_ui(self):
         central = QFrame()
-        central.setStyleSheet("background: #F5F7FA; border-radius: 8px;")
+        central.setStyleSheet("background: rgba(255,255,255,0.5); border-radius: 8px;")
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -102,7 +103,7 @@ class AudioVisualizer(QMainWindow):
         title_layout.addWidget(title_label)
         title_layout.addStretch()
 
-        for symbol, slot in [("—", self.showMinimized), ("□", self._toggle_maximize), ("✕", self.close)]:
+        for symbol, slot in [("□", self._toggle_maximize), ("✕", self.close)]:
             btn = QPushButton(symbol)
             btn.setFixedSize(32, 32)
             btn.setStyleSheet(
@@ -127,6 +128,7 @@ class AudioVisualizer(QMainWindow):
         content_layout.setSpacing(10)
 
         self.bg_label = QLabel(self.content_widget)
+        self.bg_label.setStyleSheet("background: transparent; border-radius: 8px;")
         self.bg_label.setScaledContents(True)
         self.bg_label.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.bg_label.hide()
@@ -238,7 +240,7 @@ class AudioVisualizer(QMainWindow):
 
         self.volume_slider = QSlider(Qt.Horizontal)
         self.volume_slider.setRange(0, 100)
-        self.volume_slider.setValue(60)
+        self.volume_slider.setValue(self.initial_volume)
         self.volume_slider.setFixedWidth(80)
         self.volume_slider.valueChanged.connect(self._volume_change)
         self.volume_slider.setStyleSheet(
@@ -253,6 +255,22 @@ class AudioVisualizer(QMainWindow):
 
         self.smooth_bar_vals = np.zeros(self.fft_bins)
         self.smooth_ring_vals = np.zeros(self.ring_bins)
+
+    # ========== 新增方法：统一更新背景几何和遮罩 ==========
+    def _update_bg_geometry(self):
+        if hasattr(self, 'bg_label') and self.bg_label.isVisible():
+            self.bg_label.setGeometry(self.content_widget.rect())
+            self.bg_label.setMask(self._round_mask())
+
+    # ========== 圆角遮罩方法 ==========
+    def _round_mask(self):
+        rect = self.bg_label.rect()
+        if rect.width() <= 0 or rect.height() <= 0:
+            return QRegion(rect, QRegion.Rectangle)
+        path = QPainterPath()
+        radius = 8
+        path.addRoundedRect(QRectF(rect), radius, radius)
+        return QRegion(path.toFillPolygon().toPolygon())
 
     def _make_btn(self, text, slot):
         btn = QPushButton(text)
@@ -291,28 +309,30 @@ class AudioVisualizer(QMainWindow):
             self.showMaximized()
             self.max_btn.setText("❐")
 
+    # ========== 重写 resizeEvent ==========
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        if hasattr(self, 'bg_label'):
-            self.bg_label.setGeometry(self.content_widget.rect())
-            self.bg_label.lower()
+        self._update_bg_geometry()
 
+    # ========== 重写 showEvent ==========
     def showEvent(self, event):
         super().showEvent(event)
-        if hasattr(self, 'bg_label') and self.cover_path:
-            self.bg_label.setGeometry(self.content_widget.rect())
-            self.bg_label.lower()
+        # 延迟一帧确保布局完成
+        QTimer.singleShot(0, self._update_bg_geometry)
 
     def _set_cover_background(self, image_path):
         if image_path and os.path.exists(image_path):
             pixmap = QPixmap(image_path)
             if not pixmap.isNull():
                 self.bg_label.setPixmap(pixmap)
+                self.bg_label.setScaledContents(True)
                 self.bg_label.show()
-                self.bg_label.setGeometry(self.content_widget.rect())
+                # 设置几何和遮罩，但延迟执行以等待布局完成
+                QTimer.singleShot(0, self._update_bg_geometry)
                 return
         self.bg_label.hide()
         self.bg_label.clear()
+        self.bg_label.setScaledContents(False)
 
     def load_audio(self, audio_path, lyric_path=None, cover_path=None):
         if not os.path.exists(audio_path):

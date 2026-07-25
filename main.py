@@ -62,8 +62,8 @@ class MusicdlGUI(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setObjectName("musicdlGUI")
         self.setWindowTitle('🎵 音乐下载器 cYy edit')
-        self.setMinimumSize(1450, 900)
-        self.resize(1450, 900)
+        self.setMinimumSize(1200, 800)
+        self.resize(1200, 800)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         self.playlist = []
@@ -183,7 +183,7 @@ class MusicdlGUI(QWidget):
 
         self.btn_search_title = QPushButton("🔍")
         self.btn_search_title.setObjectName("titleSearchButton")
-        self.btn_search_title.setFixedSize(36, 28)
+        self.btn_search_title.setFixedSize(38, 28)
         self.btn_search_title.clicked.connect(self.on_search_or_stop)
         title_layout.addWidget(self.btn_search_title)
 
@@ -253,6 +253,7 @@ class MusicdlGUI(QWidget):
         self.result_list.setObjectName("resultList")
         self.result_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.result_list.setSpacing(5)
+        self.result_list.setMinimumWidth(400)
         self.result_list.setStyleSheet("""
             QListWidget#resultList {
                 background: transparent;
@@ -412,7 +413,7 @@ class MusicdlGUI(QWidget):
 
         play_layout.addLayout(controls_row2)
         splitter.addWidget(play_group)
-        play_group.setMinimumWidth(280)
+        play_group.setMinimumWidth(300)
 
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
@@ -1186,10 +1187,22 @@ class MusicdlGUI(QWidget):
         msg.exec_()
 
     def show_visualization(self):
+        # 如果没有正在播放的歌曲，打开空白可视化窗口
         if self.current_play_index < 0 or not self.playlist:
-            QMessageBox.information(self, "提示", "请先播放一首歌曲")
+            # 关闭已有的可视化窗口（如有）
+            if hasattr(self, 'vis_window') and self.vis_window is not None:
+                try:
+                    self.vis_window.close()
+                except RuntimeError:
+                    pass
+                self.vis_window = None
+            # 创建空白窗口
+            self.vis_window = AudioVisualizer(parent=self, initial_volume=self.slider_volume.value())
+            self.vis_window.destroyed.connect(self._on_vis_window_destroyed)
+            self.vis_window.show()
             return
 
+        # 有正在播放的歌曲，执行原有逻辑
         song_info = self.playlist[self.current_play_index]
         base_name = self._get_base_name_for_song(song_info, "{歌手}-{歌曲名}")
         ext = song_info.get('ext', 'mp3')
@@ -1236,7 +1249,8 @@ class MusicdlGUI(QWidget):
             audio_file,
             lyric_file if os.path.exists(lyric_file) else None,
             cover_file if cover_file and os.path.exists(cover_file) else None,
-            parent=self
+            parent=self,
+            initial_volume=self.slider_volume.value()
         )
         self.vis_window.destroyed.connect(self._on_vis_window_destroyed)
         self.vis_window.show()
