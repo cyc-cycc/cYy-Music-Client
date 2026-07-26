@@ -2,7 +2,7 @@
 import os
 import sys
 def setup_runtime_paths():
-    """在源码或打包环境下，自动定位 VLC 和 FFmpeg 并设置环境变量（支持 Windows / macOS）"""
+    """在源码或打包环境下，自动定位 VLC 和 FFmpeg 并设置环境变量"""
     if getattr(sys, 'frozen', False):
         base = sys._MEIPASS
     else:
