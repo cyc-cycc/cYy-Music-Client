@@ -611,3 +611,58 @@ def get_global_stylesheet():
         padding: 4px;
     }
     """
+
+# ==================== 新增工具函数 ====================
+def build_filename(song_info: Dict, fmt: str) -> str:
+    """
+    根据格式模板生成文件名（不含扩展名）
+    :param song_info: 歌曲信息字典
+    :param fmt: 格式字符串，如 "歌手-歌曲名" 或 "{歌手}-{歌曲名}"
+    :return: 生成的文件名
+    """
+    song_name = song_info.get('song_name', '')
+    singers = song_info.get('singers', '')
+    if fmt == "歌曲名":
+        return song_name
+    elif fmt == "歌手-歌曲名":
+        return f"{singers}-{song_name}"
+    elif fmt == "歌曲名-歌手":
+        return f"{song_name}-{singers}"
+    else:  # 自定义模板
+        template = fmt
+        template = template.replace("{歌手}", singers)
+        template = template.replace("{歌曲名}", song_name)
+        template = template.replace("{专辑}", song_info.get('album', ''))
+        template = template.replace("{时长}", song_info.get('duration', ''))
+        return template
+
+def safe_stop_thread(thread, signals_to_disconnect=None, finished_callback=None):
+    """
+    安全停止 QThread，断开指定信号并等待结束。
+    :param thread: QThread 实例
+    :param signals_to_disconnect: 需要断开的信号名称列表，如 ['finished', 'source_started']
+    :param finished_callback: 线程 finished 信号的临时槽函数（用于清理）
+    """
+    if thread is None:
+        return
+    if not thread.isRunning():
+        return
+    if hasattr(thread, 'stop'):
+        thread.stop()
+    if signals_to_disconnect:
+        for sig_name in signals_to_disconnect:
+            sig = getattr(thread, sig_name, None)
+            if sig:
+                try:
+                    sig.disconnect()
+                except TypeError:
+                    pass
+    if finished_callback:
+        try:
+            thread.finished.disconnect()
+        except TypeError:
+            pass
+        thread.finished.connect(finished_callback)
+    else:
+        thread.wait()
+        thread.deleteLater()

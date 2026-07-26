@@ -69,9 +69,14 @@ class SongCard(QFrame):
 
         album = self.song_info.get('album', '')
         duration = self.song_info.get('duration', '')
+        file_size = self.song_info.get('file_size', '')  # 新增
+
         detail_text = f"{album}" if album else ""
         if duration:
             detail_text += f"  •  {duration}" if detail_text else duration
+        if file_size:
+            detail_text += f"  •  {file_size}" if detail_text else file_size
+
         self.detail_label = QLabel(detail_text)
         self.detail_label.setStyleSheet("color: #7F8C8D; font-size: 14px;")
         info_layout.addWidget(self.detail_label)

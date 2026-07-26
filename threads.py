@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Callable, Tuple
 import requests
 from PyQt5.QtCore import QThread, pyqtSignal, QRunnable, QObject, QThreadPool, pyqtSlot
 
-from utils import logger, _download_image_data, download_cover_image, get_cover_url, sanitize_filepath
+from utils import logger, _download_image_data, download_cover_image, get_cover_url, sanitize_filepath, build_filename
 from constants import DEFAULT_SAVE_DIR
 
 # ==================== 封面下载任务 ====================
@@ -195,7 +195,7 @@ class DownloadThread(QThread):
             singers = self.song_info.get('singers', '')
             ext = self.song_info.get('ext', 'mp3') or 'mp3'
 
-            base_name = self._build_base_name(song_name, singers)
+            base_name = self._build_base_name()
             base_name = sanitize_filepath(base_name)
             if not os.path.exists(work_dir):
                 os.makedirs(work_dir, exist_ok=True)
@@ -243,21 +243,9 @@ class DownloadThread(QThread):
             logger.error(f"下载失败: {e}", exc_info=True)
             self.error.emit(str(e))
 
-    def _build_base_name(self, song_name: str, singers: str) -> str:
-        fmt = self.filename_format
-        if fmt == "歌曲名":
-            return song_name
-        elif fmt == "歌手-歌曲名":
-            return f"{singers}-{song_name}"
-        elif fmt == "歌曲名-歌手":
-            return f"{song_name}-{singers}"
-        else:
-            template = fmt
-            template = template.replace("{歌手}", singers)
-            template = template.replace("{歌曲名}", song_name)
-            template = template.replace("{专辑}", self.song_info.get('album', ''))
-            template = template.replace("{时长}", self.song_info.get('duration', ''))
-            return template
+    def _build_base_name(self) -> str:
+        """使用 utils.build_filename 生成文件名"""
+        return build_filename(self.song_info, self.filename_format)
 
     def _get_unique_path(self, path: str) -> str:
         if not os.path.exists(path):

@@ -1,21 +1,11 @@
-# Core GUI framework
-PyQt5>=5.15.0
-
-# Audio processing and visualization
-librosa>=0.9.0
-numpy>=1.21.0
-matplotlib>=3.5.0
-
-# Audio playback and capture
-sounddevice>=0.4.0
-python-vlc>=3.0.0
-
-# Metadata and file handling
-mutagen>=1.45.0
-filetype>=1.0.0
-
-# Networking
-requests>=2.25.0
-
-# Music downloader core library
-musicdl>=2.0.0
+PyQt5==5.15.11
+musicdl==2.13.3
+requests==2.34.2
+python-vlc==3.0.21203
+filetype==1.2.0
+cryptography==46.0.7
+numpy==2.4.6
+sounddevice==0.5.5
+librosa==0.11.0
+matplotlib==3.11.1
+mutagen==1.48.1

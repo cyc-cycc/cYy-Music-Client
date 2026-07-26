@@ -21,7 +21,7 @@ SOURCE_GROUPS = {
         '酷我音乐(普通无损,推荐)',
         '酷狗音乐(普通无损)',
         '咪咕音乐(普通音质,推荐)',
-        '5sing音乐'
+        '5sing音乐',
     ],
     '国外音乐': [
         'SoundCloud(for XuiS😍)',
@@ -69,3 +69,11 @@ class PlayMode(IntEnum):
     SingleStop = 1
     ListRepeat = 2
     ListStop = 3
+
+# ==================== UI 常量 ====================
+THEME_PRIMARY = "#4A90D9"
+THEME_SECONDARY = "#2C3E50"
+THEME_BG = "#F5F7FA"
+ROUND_RADIUS = 8
+COVER_SIZE = 120
+SLIDER_HEIGHT = 6

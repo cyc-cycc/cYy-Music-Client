@@ -14,7 +14,7 @@ from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
 
-from PyQt5.QtCore import Qt, QTimer, QPoint, QObject, pyqtSignal, QRectF
+from PyQt5.QtCore import Qt, QTimer, QPoint, QObject, pyqtSignal, QRectF, QThread
 from PyQt5.QtGui import QColor, QFont, QPixmap, QMouseEvent, QPainterPath, QRegion
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -24,6 +24,23 @@ from PyQt5.QtWidgets import (
 
 class UpdateSignals(QObject):
     update_ui = pyqtSignal()
+
+class AudioLoadThread(QThread):
+    loaded = pyqtSignal(np.ndarray, int, str, str)  # data, sr, lyric_path, cover_path
+    error = pyqtSignal(str)
+
+    def __init__(self, audio_path, lyric_path=None, cover_path=None):
+        super().__init__()
+        self.audio_path = audio_path
+        self.lyric_path = lyric_path
+        self.cover_path = cover_path
+
+    def run(self):
+        try:
+            data, sr = librosa.load(self.audio_path, sr=None, mono=True)
+            self.loaded.emit(data, sr, self.lyric_path, self.cover_path)
+        except Exception as e:
+            self.error.emit(str(e))
 
 class AudioVisualizer(QMainWindow):
     def __init__(self, audio_path: str = None, lyric_path: str = None,
@@ -72,6 +89,8 @@ class AudioVisualizer(QMainWindow):
 
         self.initial_volume = initial_volume
         self._init_ui()
+
+        self.load_thread = None
 
         if audio_path and os.path.exists(audio_path):
             self.load_audio(audio_path, lyric_path, cover_path)
@@ -256,13 +275,11 @@ class AudioVisualizer(QMainWindow):
         self.smooth_bar_vals = np.zeros(self.fft_bins)
         self.smooth_ring_vals = np.zeros(self.ring_bins)
 
-    # ========== 新增方法：统一更新背景几何和遮罩 ==========
     def _update_bg_geometry(self):
         if hasattr(self, 'bg_label') and self.bg_label.isVisible():
             self.bg_label.setGeometry(self.content_widget.rect())
             self.bg_label.setMask(self._round_mask())
 
-    # ========== 圆角遮罩方法 ==========
     def _round_mask(self):
         rect = self.bg_label.rect()
         if rect.width() <= 0 or rect.height() <= 0:
@@ -309,15 +326,12 @@ class AudioVisualizer(QMainWindow):
             self.showMaximized()
             self.max_btn.setText("❐")
 
-    # ========== 重写 resizeEvent ==========
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self._update_bg_geometry()
 
-    # ========== 重写 showEvent ==========
     def showEvent(self, event):
         super().showEvent(event)
-        # 延迟一帧确保布局完成
         QTimer.singleShot(0, self._update_bg_geometry)
 
     def _set_cover_background(self, image_path):
@@ -327,7 +341,6 @@ class AudioVisualizer(QMainWindow):
                 self.bg_label.setPixmap(pixmap)
                 self.bg_label.setScaledContents(True)
                 self.bg_label.show()
-                # 设置几何和遮罩，但延迟执行以等待布局完成
                 QTimer.singleShot(0, self._update_bg_geometry)
                 return
         self.bg_label.hide()
@@ -337,71 +350,101 @@ class AudioVisualizer(QMainWindow):
     def load_audio(self, audio_path, lyric_path=None, cover_path=None):
         if not os.path.exists(audio_path):
             return
-        try:
-            data, sr = librosa.load(audio_path, sr=None, mono=True)
-            self.audio_data = data.astype(np.float32)
-            self.sample_rate = sr
-            self.read_index = 0
-            self.paused = False
-            self.pause_btn.setText("⏸ 暂停")
-            self.pause_btn.setEnabled(True)
+        self.audio_path = audio_path
+        # 禁用控件，显示加载状态
+        self.select_btn.setEnabled(False)
+        self.pause_btn.setEnabled(False)
+        self.song_title_label.setText("加载中...")
+        self.progress_slider.setValue(0)
+        self.time_label.setText("00:00 / 00:00")
 
-            hop_length = 512
-            n_fft = 2048
-            D = librosa.stft(self.audio_data, n_fft=n_fft, hop_length=hop_length)
-            mag = np.abs(D)
-            mel_basis = librosa.filters.mel(sr=sr, n_fft=n_fft, n_mels=self.fft_bins)
-            mel_spec = np.dot(mel_basis, mag)
-            log_mel = np.log1p(mel_spec)
-            col_max = np.max(log_mel, axis=0)
-            col_max[col_max == 0] = 1.0
-            self.norm_stft = (log_mel / col_max[np.newaxis, :]).clip(0.0, 1.0).astype(np.float32)
-            self.frame_count = self.norm_stft.shape[1]
-            self.frames_per_second = sr / hop_length
+        # 若存在旧线程，先断开信号并等待，避免旧结果覆盖新数据）
+        if self.load_thread and self.load_thread.isRunning():
+            try:
+                self.load_thread.loaded.disconnect()
+                self.load_thread.error.disconnect()
+            except TypeError:
+                pass
+            self.load_thread.quit()
+            self.load_thread.wait()
+            self.load_thread = None
 
-            if lyric_path and os.path.exists(lyric_path):
-                self.lyrics = self._parse_lrc(lyric_path)
+        self.load_thread = AudioLoadThread(audio_path, lyric_path, cover_path)
+        self.load_thread.loaded.connect(self._on_audio_loaded)
+        self.load_thread.error.connect(self._on_load_error)  # 新增错误处理槽
+        self.load_thread.start()
+
+    def _on_load_error(self, error_msg):
+        self.select_btn.setEnabled(True)
+        self.pause_btn.setEnabled(False)
+        QMessageBox.critical(self, "加载失败", error_msg)
+
+    def _on_audio_loaded(self, data, sr, lyric_path, cover_path):
+        self.audio_data = data.astype(np.float32)
+        self.sample_rate = sr
+        self.read_index = 0
+        self.paused = False
+        self.pause_btn.setText("⏸ 暂停")
+        self.pause_btn.setEnabled(True)
+
+        # 计算 STFT（耗时操作，但在后台线程已完成，这里只处理结果）
+        hop_length = 512
+        n_fft = 2048
+        D = librosa.stft(self.audio_data, n_fft=n_fft, hop_length=hop_length)
+        mag = np.abs(D)
+        mel_basis = librosa.filters.mel(sr=sr, n_fft=n_fft, n_mels=self.fft_bins)
+        mel_spec = np.dot(mel_basis, mag)
+        log_mel = np.log1p(mel_spec)
+        col_max = np.max(log_mel, axis=0)
+        col_max[col_max == 0] = 1.0
+        self.norm_stft = (log_mel / col_max[np.newaxis, :]).clip(0.0, 1.0).astype(np.float32)
+        self.frame_count = self.norm_stft.shape[1]
+        self.frames_per_second = sr / hop_length
+
+        # 加载歌词
+        if lyric_path and os.path.exists(lyric_path):
+            self.lyrics = self._parse_lrc(lyric_path)
+        else:
+            default_lrc = os.path.splitext(self.audio_path)[0] + ".lrc"
+            if os.path.exists(default_lrc):
+                self.lyrics = self._parse_lrc(default_lrc)
             else:
-                default_lrc = os.path.splitext(audio_path)[0] + ".lrc"
-                if os.path.exists(default_lrc):
-                    self.lyrics = self._parse_lrc(default_lrc)
-                else:
-                    self.lyrics = []
-            self.lyric_list.clear()
-            for _, text in self.lyrics:
-                item = QListWidgetItem(text)
-                item.setForeground(QColor(44, 62, 80))
-                self.lyric_list.addItem(item)
-            if not self.lyrics:
-                self.lyric_list.addItem("（无歌词）")
-            self.current_lyric_index = -1
+                self.lyrics = []
+        self.lyric_list.clear()
+        for _, text in self.lyrics:
+            item = QListWidgetItem(text)
+            item.setForeground(QColor(44, 62, 80))
+            self.lyric_list.addItem(item)
+        if not self.lyrics:
+            self.lyric_list.addItem("（无歌词）")
+        self.current_lyric_index = -1
 
-            self.song_title_label.setText(os.path.splitext(os.path.basename(audio_path))[0])
+        self.song_title_label.setText(os.path.splitext(os.path.basename(self.audio_path))[0])
 
-            if cover_path and os.path.exists(cover_path):
-                self.cover_path = cover_path
-            else:
-                covers = glob.glob(os.path.splitext(audio_path)[0] + "_cover.*")
-                self.cover_path = covers[0] if covers else None
-            self._set_cover_background(self.cover_path)
+        # 封面
+        if cover_path and os.path.exists(cover_path):
+            self.cover_path = cover_path
+        else:
+            covers = glob.glob(os.path.splitext(self.audio_path)[0] + "_cover.*")
+            self.cover_path = covers[0] if covers else None
+        self._set_cover_background(self.cover_path)
 
-            if self.stream:
-                self.stream.stop()
-                self.stream.close()
-            self.stream = sd.OutputStream(
-                samplerate=sr, channels=1, callback=self._audio_callback,
-                blocksize=1024, latency='low'
-            )
-            self.stream.start()
+        # 初始化音频流
+        if self.stream:
+            self.stream.stop()
+            self.stream.close()
+        self.stream = sd.OutputStream(
+            samplerate=sr, channels=1, callback=self._audio_callback,
+            blocksize=1024, latency='low'
+        )
+        self.stream.start()
 
-            self.total_time = len(self.audio_data) / sr
-            self.progress_slider.setValue(0)
-            self.time_label.setText(f"00:00 / {self._format_time(self.total_time)}")
+        self.total_time = len(self.audio_data) / sr
+        self.progress_slider.setValue(0)
+        self.time_label.setText(f"00:00 / {self._format_time(self.total_time)}")
 
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"加载音频失败: {e}")
-            self.pause_btn.setEnabled(False)
-            self.norm_stft = None
+        self.select_btn.setEnabled(True)
+        self.pause_btn.setEnabled(True)
 
     def _parse_lrc(self, lrc_path):
         lyrics = []
@@ -608,4 +651,7 @@ class AudioVisualizer(QMainWindow):
         if self.stream:
             self.stream.stop()
             self.stream.close()
+        if self.load_thread and self.load_thread.isRunning():
+            self.load_thread.quit()
+            self.load_thread.wait()
         super().closeEvent(e)
