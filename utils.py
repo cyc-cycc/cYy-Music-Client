@@ -5,6 +5,7 @@ import re
 import logging
 import traceback
 import time
+import subprocess
 from logging.handlers import RotatingFileHandler
 from typing import Dict, Optional, Tuple
 
@@ -553,7 +554,6 @@ def get_global_stylesheet():
         background: #E8EDF2;
     }
     QComboBox::down-arrow {
-        /* 使用 Unicode 箭头或图片，这里用默认 */
         width: 12px;
         height: 12px;
     }
@@ -666,3 +666,48 @@ def safe_stop_thread(thread, signals_to_disconnect=None, finished_callback=None)
     else:
         thread.wait()
         thread.deleteLater()
+
+# ==================== 音频格式转换（新增） ====================
+def convert_audio(input_path: str, output_format: str, bitrate: str = None) -> str:
+    """
+    使用 ffmpeg 转换音频格式。
+    返回输出文件路径，若失败返回 None。
+    """
+    if not output_format:
+        return input_path
+    # 检查 ffmpeg 是否可用
+    try:
+        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+    except (subprocess.SubprocessError, FileNotFoundError):
+        logger.warning("FFmpeg 未找到，跳过格式转换")
+        return None
+
+    base, _ = os.path.splitext(input_path)
+    output_path = f"{base}.{output_format}"
+    if os.path.exists(output_path):
+        # 如果已存在，添加后缀
+        counter = 1
+        while os.path.exists(f"{base}_{counter}.{output_format}"):
+            counter += 1
+        output_path = f"{base}_{counter}.{output_format}"
+    
+    cmd = ['ffmpeg', '-y', '-i', input_path]
+    if bitrate:
+        cmd.extend(['-b:a', bitrate])
+    if output_format == 'mp3':
+        cmd.extend(['-acodec', 'libmp3lame'])
+    elif output_format == 'aac':
+        cmd.extend(['-acodec', 'aac'])
+    elif output_format == 'ogg':
+        cmd.extend(['-acodec', 'libvorbis'])
+    elif output_format == 'flac':
+        cmd.extend(['-acodec', 'flac'])
+    cmd.append(output_path)
+
+    try:
+        subprocess.run(cmd, capture_output=True, check=True)
+        logger.info(f"转换成功: {output_path}")
+        return output_path
+    except subprocess.CalledProcessError as e:
+        logger.error(f"转换失败: {e.stderr.decode() if e.stderr else '未知错误'}")
+        return None

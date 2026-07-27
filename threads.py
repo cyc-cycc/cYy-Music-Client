@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Callable, Tuple
 import requests
 from PyQt5.QtCore import QThread, pyqtSignal, QRunnable, QObject, QThreadPool, pyqtSlot
 
-from utils import logger, _download_image_data, download_cover_image, get_cover_url, sanitize_filepath, build_filename
+from utils import logger, _download_image_data, download_cover_image, get_cover_url, sanitize_filepath, build_filename, convert_audio
 from constants import DEFAULT_SAVE_DIR
 
 # ==================== 封面下载任务 ====================
@@ -37,79 +37,67 @@ class CoverRunnable(QRunnable):
 
 # ==================== 搜索线程 ====================
 class SearchThread(QThread):
-    source_started = pyqtSignal(int, str)          # task_id, source
-    source_finished = pyqtSignal(int, str, list)  # task_id, source, results
-    finished = pyqtSignal(int)                    # task_id
-    error = pyqtSignal(int, str)                  # task_id, error
+    result_ready = pyqtSignal(int, str, dict)      # task_id, source, song_info
+    source_done = pyqtSignal(int, str, int)        # task_id, source, count
+    source_error = pyqtSignal(int, str)            # task_id, error_msg
+    all_done = pyqtSignal(int)                     # task_id
 
-    def __init__(self, music_client, sources: List[str],
-                 keyword: str, limit_per_source: int, task_id: int,
-                 threadings_per_source: int = 5):
+    def __init__(self, music_client, keyword: str, task_id: int):
         super().__init__()
         self.music_client = music_client
-        self.sources = sources
         self.keyword = keyword
-        self.limit_per_source = limit_per_source
         self.task_id = task_id
-        self.threadings_per_source = threadings_per_source
-        self._stop_event = threading.Event()
-        self._executor = None
+        self._stop = False
 
     def stop(self):
-        self._stop_event.set()
-        if self._executor:
-            try:
-                self._executor.shutdown(wait=False)
-            except Exception:
-                pass
+        self._stop = True
 
     def run(self):
-        self._executor = ThreadPoolExecutor(max_workers=max(1, len(self.sources)))
-        futures = {}
-        try:
-            for source in self.sources:
-                if self._stop_event.is_set():
-                    break
-                self.source_started.emit(self.task_id, source)
-                fut = self._executor.submit(
-                    self._search_single_source, source, self.keyword,
-                    self.limit_per_source, self.threadings_per_source
-                )
-                futures[fut] = source
+        sources = list(self.music_client.music_clients.keys())
+        if not sources:
+            self.all_done.emit(self.task_id)
+            return
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(sources)) as executor:
+            futures = {}
+            for src in sources:
+                fut = executor.submit(self._search_source, src)
+                futures[fut] = src
 
             for fut in concurrent.futures.as_completed(futures):
-                if self._stop_event.is_set():
-                    break
-                source = futures.get(fut)
+                src = futures[fut]
                 try:
-                    results = fut.result()
-                    if results is None:
-                        results = []
-                    self.source_finished.emit(self.task_id, source, results)
+                    count = fut.result()
+                    self.source_done.emit(self.task_id, src, count)
                 except Exception as e:
-                    self.error.emit(self.task_id, f"{source} 搜索失败: {str(e)}")
-        except Exception as e:
-            self.error.emit(self.task_id, str(e))
-        finally:
-            try:
-                self._executor.shutdown(wait=False)
-            except Exception:
-                pass
-            self.finished.emit(self.task_id)
+                    self.source_error.emit(self.task_id, f"{src}: {str(e)}")
 
-    def _search_single_source(self, source: str, keyword: str, limit: int,
-                              num_threadings: int) -> Optional[List]:
-        if self._stop_event.is_set():
-            return None
+        self.all_done.emit(self.task_id)
+
+    def _search_source(self, source):
         try:
             client = self.music_client.music_clients[source]
-            results = client.search(
-                keyword=keyword,
-                num_threadings=num_threadings
-            )
-            return results[:limit]
+            results = client.search(keyword=self.keyword, num_threadings=1)
+            if self._stop:
+                return 0
+            count = 0
+            for info in results:
+                if self._stop:
+                    break
+                if not isinstance(info, dict):
+                    info = {k: getattr(info, k, '') for k in ['song_name', 'singers', 'album', 'ext',
+                                                               'duration', 'duration_s', 'cover_url',
+                                                               'lyric', 'download_url', 'identifier',
+                                                               'source', 'file_size']}
+                    info['source'] = source
+                else:
+                    info['source'] = info.get('source', source)
+                self.result_ready.emit(self.task_id, source, info)
+                count += 1
+            return count
         except Exception as e:
-            raise e
+            self.source_error.emit(self.task_id, f"{source}: {str(e)}")
+            return 0
 
 # ==================== 歌单解析线程 ====================
 class PlaylistParseThread(QThread):
@@ -117,8 +105,9 @@ class PlaylistParseThread(QThread):
     parse_finished = pyqtSignal(int, list, str)     # task_id, song_infos, source_display
     parse_error = pyqtSignal(int, str)
 
-    def __init__(self, playlist_url: str, source_internal: str, source_display: str, task_id: int):
+    def __init__(self, music_client, playlist_url: str, source_internal: str, source_display: str, task_id: int):
         super().__init__()
+        self.music_client = music_client
         self.playlist_url = playlist_url
         self.source_internal = source_internal
         self.source_display = source_display
@@ -131,12 +120,12 @@ class PlaylistParseThread(QThread):
     def run(self):
         try:
             self.parse_started.emit(self.task_id)
-            from musicdl import musicdl
-            init_cfg = {self.source_internal: {'search_size_per_source': 50}}
-            client = musicdl.MusicClient(
-                music_sources=[self.source_internal],
-                init_music_clients_cfg=init_cfg
-            )
+            client = self.music_client.music_clients.get(self.source_internal)
+            if not client:
+                from musicdl import musicdl
+                temp_client = musicdl.MusicClient(music_sources=[self.source_internal])
+                client = temp_client.music_clients[self.source_internal]
+
             if self._stop:
                 return
             song_infos = client.parseplaylist(self.playlist_url)
@@ -145,6 +134,7 @@ class PlaylistParseThread(QThread):
             if not song_infos:
                 self.parse_error.emit(self.task_id, "歌单解析结果为空")
                 return
+
             valid = []
             for info in song_infos:
                 if self._stop:
@@ -156,7 +146,10 @@ class PlaylistParseThread(QThread):
                     else:
                         logger.warning(f"歌曲 {info.get('song_name')} 缺少下载链接，跳过")
                         continue
+                if 'identifier' not in info and 'song_id' in info:
+                    info['identifier'] = info['song_id']
                 valid.append(info)
+
             if not valid:
                 self.parse_error.emit(self.task_id, "所有歌曲均无有效下载链接")
                 return
@@ -165,7 +158,7 @@ class PlaylistParseThread(QThread):
             logger.error(f"歌单解析线程异常: {e}", exc_info=True)
             self.parse_error.emit(self.task_id, str(e))
 
-# ==================== 下载线程 ====================
+# ==================== 下载线程（增加格式转换） ====================
 class DownloadThread(QThread):
     progress = pyqtSignal(int)
     finished = pyqtSignal(str, str, str)   # song_name, singers, file_path
@@ -173,7 +166,8 @@ class DownloadThread(QThread):
 
     def __init__(self, song_info: Dict, get_request_kwargs: Callable[[str], Dict],
                  save_dir: str, filename_format: str,
-                 download_lyric: bool, download_cover: bool):
+                 download_lyric: bool, download_cover: bool,
+                 convert_format: str = '', convert_bitrate: str = ''):
         super().__init__()
         self.song_info = song_info
         self.get_request_kwargs = get_request_kwargs
@@ -181,6 +175,8 @@ class DownloadThread(QThread):
         self.filename_format = filename_format
         self.download_lyric = download_lyric
         self.download_cover = download_cover
+        self.convert_format = convert_format
+        self.convert_bitrate = convert_bitrate
         self._stop = False
 
     def stop(self):
@@ -208,6 +204,21 @@ class DownloadThread(QThread):
                 request_kwargs['cookies'] = self.song_info['cookies']
 
             self._download_file(url, audio_file_path, request_kwargs)
+
+            # ===== 格式转换（新增） =====
+            if self.convert_format and not self._stop:
+                converted = convert_audio(audio_file_path, self.convert_format, self.convert_bitrate)
+                if converted:
+                    # 删除原文件（如果需要）
+                    # 注意：如果转换输出同名但不同扩展名，则保留两者；这里我们替换为转换后的文件
+                    if converted != audio_file_path:
+                        try:
+                            os.remove(audio_file_path)
+                        except Exception:
+                            pass
+                        audio_file_path = converted
+                else:
+                    self.error.emit("格式转换失败，保留原文件")
 
             if self.download_lyric and not self._stop:
                 lyric_text = self.song_info.get('lyric') or self.song_info.get('lyrics', '')
@@ -244,7 +255,6 @@ class DownloadThread(QThread):
             self.error.emit(str(e))
 
     def _build_base_name(self) -> str:
-        """使用 utils.build_filename 生成文件名"""
         return build_filename(self.song_info, self.filename_format)
 
     def _get_unique_path(self, path: str) -> str:

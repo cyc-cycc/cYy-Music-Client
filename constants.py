@@ -6,11 +6,11 @@ from enum import IntEnum
 # ==================== 路径常量 ====================
 APP_DIR = os.path.dirname(os.path.abspath(__file__)) if not getattr(sys, 'frozen', False) else os.path.dirname(sys.executable)
 if sys.platform == 'darwin':
-    DATA_DIR = os.path.join(os.path.expanduser("~"), "Documents", "musicspdgui-cyy")
+    DATA_DIR = os.path.join(os.path.expanduser("~"), "Documents", "CMC")
 else:
     DATA_DIR = APP_DIR
 LOG_DIR = os.path.join(DATA_DIR, 'logs')
-LOG_FILE = os.path.join(LOG_DIR, 'musicdl_gui.log')
+LOG_FILE = os.path.join(LOG_DIR, 'CMC.log')
 DEFAULT_SAVE_DIR = os.path.join(DATA_DIR, 'download')
 
 # ==================== 搜索源相关 ====================
@@ -70,10 +70,3 @@ class PlayMode(IntEnum):
     ListRepeat = 2
     ListStop = 3
 
-# ==================== UI 常量 ====================
-THEME_PRIMARY = "#4A90D9"
-THEME_SECONDARY = "#2C3E50"
-THEME_BG = "#F5F7FA"
-ROUND_RADIUS = 8
-COVER_SIZE = 120
-SLIDER_HEIGHT = 6

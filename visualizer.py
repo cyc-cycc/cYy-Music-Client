@@ -26,7 +26,7 @@ class UpdateSignals(QObject):
     update_ui = pyqtSignal()
 
 class AudioLoadThread(QThread):
-    loaded = pyqtSignal(np.ndarray, int, str, str)  # data, sr, lyric_path, cover_path
+    loaded = pyqtSignal(np.ndarray, int, np.ndarray, str, str)
     error = pyqtSignal(str)
 
     def __init__(self, audio_path, lyric_path=None, cover_path=None):
@@ -38,7 +38,17 @@ class AudioLoadThread(QThread):
     def run(self):
         try:
             data, sr = librosa.load(self.audio_path, sr=None, mono=True)
-            self.loaded.emit(data, sr, self.lyric_path, self.cover_path)
+            hop_length = 512
+            n_fft = 2048
+            D = librosa.stft(data, n_fft=n_fft, hop_length=hop_length)
+            mag = np.abs(D)
+            mel_basis = librosa.filters.mel(sr=sr, n_fft=n_fft, n_mels=45)
+            mel_spec = np.dot(mel_basis, mag)
+            log_mel = np.log1p(mel_spec)
+            col_max = np.max(log_mel, axis=0)
+            col_max[col_max == 0] = 1.0
+            norm_stft = (log_mel / col_max[np.newaxis, :]).clip(0.0, 1.0).astype(np.float32)
+            self.loaded.emit(data, sr, norm_stft, self.lyric_path, self.cover_path)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -351,14 +361,12 @@ class AudioVisualizer(QMainWindow):
         if not os.path.exists(audio_path):
             return
         self.audio_path = audio_path
-        # 禁用控件，显示加载状态
         self.select_btn.setEnabled(False)
         self.pause_btn.setEnabled(False)
         self.song_title_label.setText("加载中...")
         self.progress_slider.setValue(0)
         self.time_label.setText("00:00 / 00:00")
 
-        # 若存在旧线程，先断开信号并等待，避免旧结果覆盖新数据）
         if self.load_thread and self.load_thread.isRunning():
             try:
                 self.load_thread.loaded.disconnect()
@@ -371,7 +379,7 @@ class AudioVisualizer(QMainWindow):
 
         self.load_thread = AudioLoadThread(audio_path, lyric_path, cover_path)
         self.load_thread.loaded.connect(self._on_audio_loaded)
-        self.load_thread.error.connect(self._on_load_error)  # 新增错误处理槽
+        self.load_thread.error.connect(self._on_load_error)
         self.load_thread.start()
 
     def _on_load_error(self, error_msg):
@@ -379,29 +387,19 @@ class AudioVisualizer(QMainWindow):
         self.pause_btn.setEnabled(False)
         QMessageBox.critical(self, "加载失败", error_msg)
 
-    def _on_audio_loaded(self, data, sr, lyric_path, cover_path):
+    def _on_audio_loaded(self, data, sr, stft_data, lyric_path, cover_path):
         self.audio_data = data.astype(np.float32)
         self.sample_rate = sr
+        self.norm_stft = stft_data
+        self.frame_count = self.norm_stft.shape[1]
+        self.hop_length = 512
+        self.frames_per_second = sr / self.hop_length
+
         self.read_index = 0
         self.paused = False
         self.pause_btn.setText("⏸ 暂停")
         self.pause_btn.setEnabled(True)
 
-        # 计算 STFT（耗时操作，但在后台线程已完成，这里只处理结果）
-        hop_length = 512
-        n_fft = 2048
-        D = librosa.stft(self.audio_data, n_fft=n_fft, hop_length=hop_length)
-        mag = np.abs(D)
-        mel_basis = librosa.filters.mel(sr=sr, n_fft=n_fft, n_mels=self.fft_bins)
-        mel_spec = np.dot(mel_basis, mag)
-        log_mel = np.log1p(mel_spec)
-        col_max = np.max(log_mel, axis=0)
-        col_max[col_max == 0] = 1.0
-        self.norm_stft = (log_mel / col_max[np.newaxis, :]).clip(0.0, 1.0).astype(np.float32)
-        self.frame_count = self.norm_stft.shape[1]
-        self.frames_per_second = sr / hop_length
-
-        # 加载歌词
         if lyric_path and os.path.exists(lyric_path):
             self.lyrics = self._parse_lrc(lyric_path)
         else:
@@ -410,6 +408,7 @@ class AudioVisualizer(QMainWindow):
                 self.lyrics = self._parse_lrc(default_lrc)
             else:
                 self.lyrics = []
+        
         self.lyric_list.clear()
         for _, text in self.lyrics:
             item = QListWidgetItem(text)
@@ -421,7 +420,6 @@ class AudioVisualizer(QMainWindow):
 
         self.song_title_label.setText(os.path.splitext(os.path.basename(self.audio_path))[0])
 
-        # 封面
         if cover_path and os.path.exists(cover_path):
             self.cover_path = cover_path
         else:
@@ -429,7 +427,6 @@ class AudioVisualizer(QMainWindow):
             self.cover_path = covers[0] if covers else None
         self._set_cover_background(self.cover_path)
 
-        # 初始化音频流
         if self.stream:
             self.stream.stop()
             self.stream.close()
@@ -640,18 +637,32 @@ class AudioVisualizer(QMainWindow):
     def _format_time(sec):
         return f"{int(sec // 60):02d}:{int(sec % 60):02d}"
 
+    # ==================== 改进 6：增强资源释放 ====================
     def closeEvent(self, e):
-        plt.close(self.bar_fig)
-        plt.close(self.ring_fig)
+        # 停止定时器
         self.timer.stop()
         try:
             self.signals.update_ui.disconnect()
         except TypeError:
             pass
+
+        # 关闭音频流
         if self.stream:
             self.stream.stop()
             self.stream.close()
+
+        # 等待加载线程
         if self.load_thread and self.load_thread.isRunning():
             self.load_thread.quit()
             self.load_thread.wait()
+
+        # 清理 matplotlib 资源
+        if hasattr(self, 'bar_canvas'):
+            self.bar_canvas.figure.clear()
+            self.bar_canvas.deleteLater()
+        if hasattr(self, 'ring_canvas'):
+            self.ring_canvas.figure.clear()
+            self.ring_canvas.deleteLater()
+        plt.close('all')
+
         super().closeEvent(e)

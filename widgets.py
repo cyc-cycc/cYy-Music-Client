@@ -69,7 +69,7 @@ class SongCard(QFrame):
 
         album = self.song_info.get('album', '')
         duration = self.song_info.get('duration', '')
-        file_size = self.song_info.get('file_size', '')  # 新增
+        file_size = self.song_info.get('file_size', '')
 
         detail_text = f"{album}" if album else ""
         if duration:
@@ -114,7 +114,7 @@ class SongCard(QFrame):
     def _load_cover(self):
         cover_url = self.song_info.get('cover_url') or self.song_info.get('cover')
         if cover_url:
-            self.loader = CoverLoader(cover_url)   # 使用模块级类
+            self.loader = CoverLoader(cover_url)
             self.loader.finished.connect(self._set_cover_pixmap)
             self.loader.start()
 
@@ -252,32 +252,30 @@ class MarqueeLabel(QLabel):
             self._timer.start()
         super().leaveEvent(event)
 
-# ==================== 设置对话框（带自定义标题栏） ====================
+# ==================== 设置对话框（带自定义标题栏，新增格式转换） ====================
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setModal(True)
-        self.setMinimumSize(620, 330)
-        self.resize(620, 330)
+        self.setMinimumSize(620, 400)  # 调高以容纳新选项
+        self.resize(620, 400)
         
         # 拖拽相关
         self.drag_pos = QPoint()
         self.dragging = False
         
         self._init_ui()
-        self.load_settings()
 
     def _init_ui(self):
-        # 主布局（垂直）
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
         # ---------- 标题栏 ----------
         title_bar = QWidget()
-        title_bar.setObjectName("settingsTitleBar")  # 可单独样式，也可复用通用样式
+        title_bar.setObjectName("settingsTitleBar")
         title_bar.setFixedHeight(40)
         title_bar.setStyleSheet("""
             #settingsTitleBar {
@@ -286,7 +284,6 @@ class SettingsDialog(QDialog):
                 border-bottom: 1px solid #BDC3C7;
             }
         """)
-        # 鼠标事件绑定（拖动）
         title_bar.mousePressEvent = self._title_mouse_press
         title_bar.mouseMoveEvent = self._title_mouse_move
         title_bar.mouseReleaseEvent = self._title_mouse_release
@@ -295,19 +292,16 @@ class SettingsDialog(QDialog):
         title_layout.setContentsMargins(10, 0, 10, 0)
         title_layout.setSpacing(5)
 
-        # 图标（使用文本符号）
         icon_label = QLabel("⚙️")
         icon_label.setStyleSheet("font-size: 18px; background: transparent;")
         title_layout.addWidget(icon_label)
 
-        # 标题
         title_label = QLabel("设置")
         title_label.setStyleSheet("color: #2C3E50; font-weight: bold; font-size: 14px; background: transparent;")
         title_layout.addWidget(title_label)
 
         title_layout.addStretch()
 
-        # ---------- 窗口控制按钮（仅关闭） ----------
         self.btn_close = QPushButton("✕")
         self.btn_close.setObjectName("titleCloseButton")
         self.btn_close.setFixedSize(32, 32)
@@ -316,7 +310,7 @@ class SettingsDialog(QDialog):
 
         main_layout.addWidget(title_bar)
 
-        # ---------- 内容区域（背景圆角） ----------
+        # ---------- 内容区域 ----------
         content_widget = QWidget()
         content_widget.setObjectName("settingsContent")
         content_widget.setStyleSheet("""
@@ -329,13 +323,11 @@ class SettingsDialog(QDialog):
         content_layout.setContentsMargins(15, 15, 15, 15)
         content_layout.setSpacing(10)
 
-        # 原有控件（标签页等）
         self._create_content(content_layout)
 
         main_layout.addWidget(content_widget)
 
     def _create_content(self, parent_layout):
-        # 将原 init_ui 中的内容迁移到这里
         tabs = QTabWidget()
         parent_layout.addWidget(tabs)
 
@@ -347,7 +339,6 @@ class SettingsDialog(QDialog):
 
         self.source_checkboxes = []
 
-        from constants import SOURCE_GROUPS  # 确保导入
         for group_name, source_names in SOURCE_GROUPS.items():
             group_box = QGroupBox(group_name)
             group_box.setFlat(True)
@@ -386,6 +377,7 @@ class SettingsDialog(QDialog):
         download_tab = QWidget()
         download_layout = QVBoxLayout(download_tab)
 
+        # 路径
         path_layout = QHBoxLayout()
         self.path_edit = QLineEdit()
         self.path_edit.setReadOnly(True)
@@ -405,6 +397,7 @@ class SettingsDialog(QDialog):
         path_layout.addWidget(self.btn_desktop)
         download_layout.addLayout(path_layout)
 
+        # 文件名格式
         fmt_layout = QHBoxLayout()
         self.format_combo = QComboBox()
         self.format_combo.addItems(FILENAME_FORMATS)
@@ -417,11 +410,35 @@ class SettingsDialog(QDialog):
         fmt_layout.addWidget(self.format_custom_edit)
         download_layout.addLayout(fmt_layout)
 
+        # 歌词/封面
         self.check_lyric = QCheckBox("下载歌词")
         self.check_cover = QCheckBox("下载封面")
         self.check_cover.setChecked(True)
         download_layout.addWidget(self.check_lyric)
         download_layout.addWidget(self.check_cover)
+
+        # ===== 新增：格式转换 =====
+        convert_group = QGroupBox("音频格式转换（需 FFmpeg）")
+        convert_layout = QVBoxLayout(convert_group)
+        conv_row1 = QHBoxLayout()
+        self.convert_check = QCheckBox("启用转换")
+        self.convert_check.setChecked(False)
+        conv_row1.addWidget(self.convert_check)
+        conv_row1.addWidget(QLabel("目标格式:"))
+        self.convert_combo = QComboBox()
+        self.convert_combo.addItems(["mp3", "aac", "ogg", "flac"])
+        self.convert_combo.setEnabled(False)
+        self.convert_check.toggled.connect(self.convert_combo.setEnabled)
+        conv_row1.addWidget(self.convert_combo)
+        conv_row1.addWidget(QLabel("比特率:"))
+        self.bitrate_combo = QComboBox()
+        self.bitrate_combo.addItems(["128k", "192k", "256k", "320k"])
+        self.bitrate_combo.setEnabled(False)
+        self.convert_check.toggled.connect(lambda checked: self.bitrate_combo.setEnabled(checked and self.convert_combo.isEnabled()))
+        conv_row1.addWidget(self.bitrate_combo)
+        conv_row1.addStretch()
+        convert_layout.addLayout(conv_row1)
+        download_layout.addWidget(convert_group)
 
         label = QLabel("Made By cYy")
         label.setAlignment(Qt.AlignRight)
@@ -458,16 +475,7 @@ class SettingsDialog(QDialog):
             self.dragging = False
             event.accept()
 
-    # ---------- 最大化/还原 ----------
-    def _toggle_maximize(self):
-        if self.isMaximized():
-            self.showNormal()
-            self.btn_max.setText("□")
-        else:
-            self.showMaximized()
-            self.btn_max.setText("❐")
-
-    # ---------- 原有方法保持不变 ----------
+    # ---------- 其他方法 ----------
     def browse_path(self):
         path = QFileDialog.getExistingDirectory(self, "选择保存目录", self.path_edit.text())
         if path:
@@ -479,10 +487,6 @@ class SettingsDialog(QDialog):
         else:
             self.format_custom_edit.hide()
 
-    def load_settings(self):
-        # 无需修改
-        pass
-
     def get_settings(self):
         selected_sources = [cb.text() for cb in self.source_checkboxes if cb.isChecked()]
         return {
@@ -493,5 +497,9 @@ class SettingsDialog(QDialog):
             'filename_format': self.format_combo.currentText(),
             'custom_format': self.format_custom_edit.text().strip(),
             'download_lyric': self.check_lyric.isChecked(),
-            'download_cover': self.check_cover.isChecked()
+            'download_cover': self.check_cover.isChecked(),
+            # 新增转换选项
+            'convert_enabled': self.convert_check.isChecked(),
+            'convert_format': self.convert_combo.currentText() if self.convert_check.isChecked() else '',
+            'convert_bitrate': self.bitrate_combo.currentText() if self.convert_check.isChecked() else '',
         }

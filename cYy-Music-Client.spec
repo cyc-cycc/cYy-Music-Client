@@ -156,13 +156,14 @@ app = BUNDLE(
     coll,
     name=APP_NAME + '.app',
     icon=ICON_PATH if os.path.exists(ICON_PATH) else None,
-    bundle_identifier='com.yourcompany.musicdlgui',
+    bundle_identifier='com.cYy.musicdlgui',
     info_plist={
-        'CFBundleShortVersionString': '4.3.0',
-        'CFBundleVersion': '4.3.0',
+        'CFBundleShortVersionString': '4.4.1',
+        'CFBundleVersion': '4.4.1',
         'CFBundleName': 'cYy Music Client',
         'CFBundleDisplayName': 'cYy Music Client',
         'NSHighResolutionCapable': True,
         'LSMinimumSystemVersion': '10.13',
+        'NSMicrophoneUsageDescription': '此应用需要访问音频设备以播放和可视化音乐文件',
     },
 )

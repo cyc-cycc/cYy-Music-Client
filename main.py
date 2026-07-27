@@ -11,9 +11,11 @@ import base64
 import hashlib
 from cryptography.fernet import Fernet
 from typing import Dict, List, Optional, Tuple
+from pathlib import Path
 
-# ===== 加密常量（固定密钥） =====
-ENCRYPTION_PASSWORD = 为保证数据安全，抹去
+REFRESH_SEARCH_SIZE = 2
+# ===== 加密常量（固定密钥，可配置） =====
+ENCRYPTION_PASSWORD = "cYy4_Music3_Client0_playlist_PASSWORD"
 
 # ===== 先设置运行时路径，再导入可能依赖 VLC 的模块 =====
 from utils import setup_runtime_paths
@@ -49,7 +51,7 @@ from PyQt5.QtGui import (
 from PyQt5.QtCore import (
     QThread, pyqtSignal, Qt, QTimer, QObject,
     QRunnable, QThreadPool, pyqtSlot, QPoint, QRect,
-    QRectF, QUrl, QSize
+    QRectF, QUrl, QSize, QThreadPool
 )
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QCheckBox, QLineEdit,
@@ -60,6 +62,56 @@ from PyQt5.QtWidgets import (
     QListWidgetItem, QProgressDialog, QMainWindow, QFrame,
     QSplitter, QDialog, QTabWidget, QFormLayout
 )
+
+# ==================== 配置管理 ====================
+def get_config_dir():
+    """获取适合当前平台的用户配置目录"""
+    if sys.platform == 'win32':
+        return Path(DATA_DIR) / '.CMC'
+    elif sys.platform == 'darwin':
+        return Path.home() / 'Library' / 'Application Support' / '.CMC'
+    else:
+        return Path.home() / '.config' / '.CMC'
+
+CONFIG_DIR = get_config_dir()
+CONFIG_FILE = CONFIG_DIR / 'config.json'
+DEFAULT_SETTINGS = {
+    'sources': ['酷我音乐(普通无损,推荐)'],
+    'limit': 10,
+    'dedup': False,
+    'save_dir': DEFAULT_SAVE_DIR,
+    'filename_format': '歌手-歌曲名',
+    'custom_format': '',
+    'download_lyric': True,
+    'download_cover': True,
+    'volume': 60,
+    'play_mode': 2,  # ListRepeat
+    'convert_enabled': False,
+    'convert_format': 'mp3',
+    'convert_bitrate': '320k',
+}
+
+def load_settings() -> dict:
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                # 合并默认值，防止新增字段缺失
+                for k, v in DEFAULT_SETTINGS.items():
+                    if k not in data:
+                        data[k] = v
+                return data
+        except Exception as e:
+            logger.error(f"加载配置失败: {e}")
+    return DEFAULT_SETTINGS.copy()
+
+def save_settings(settings: dict):
+    try:
+        CONFIG_DIR.mkdir(exist_ok=True)
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"保存配置失败: {e}")
 
 # ==================== 主窗口 ====================
 class MusicdlGUI(QWidget):
@@ -73,9 +125,13 @@ class MusicdlGUI(QWidget):
         self.resize(1200, 800)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
+        # ---- 加载配置 ----
+        self.settings = load_settings()
+        self._apply_volume_from_settings()
+
         self.playlist = []
         self.current_play_index = -1
-        self.play_mode = PlayMode.ListRepeat
+        self.play_mode = PlayMode(self.settings.get('play_mode', 2))
 
         self.setup_title_bar()
         self._init_ui()
@@ -83,7 +139,7 @@ class MusicdlGUI(QWidget):
         self._init_signals()
         self._init_state()
         self._init_player()
-        self.update_playlist_widget()  # 初始化歌单显示
+        self.update_playlist_widget()
 
         self._requests_session = requests.Session()
         self._requests_session.verify = True
@@ -94,20 +150,33 @@ class MusicdlGUI(QWidget):
 
         self._download_cancelled = False
 
-        self.settings = {
-            'sources': [
-                    '酷我音乐(普通无损,推荐)'
-                ],
-            'limit': 10,
-            'dedup': False,
-            'save_dir': DEFAULT_SAVE_DIR,
-            'filename_format': '歌手-歌曲名',
-            'custom_format': '',
-            'download_lyric': True,
-            'download_cover': True
-        }
-        self.parse_progress = None   # 用于歌单解析进度对话框
+        # ---- 初始化 MusicClient（单例） ----
+        self.music_client = None
+        self._init_music_client()
+
+        self.parse_progress = None
         QTimer.singleShot(100, self._check_deps)
+
+        self._url_cache = {}  # identifier -> (url, timestamp)
+        # ---- 封面线程池（改进3） ----
+        self.cover_pool = QThreadPool.globalInstance()
+        self.cover_pool.setMaxThreadCount(10)
+
+        # ---- 下载并发控制（改进5 & 12） ----
+        self.download_concurrency = 3          # 可配置
+        self.active_downloads = []             # 活跃下载线程
+        self.download_queue = []               # 待下载列表
+        self.download_completed = 0            # 已完成数
+        self.download_start_time = None
+        self.download_total_bytes = 0
+        self.download_done_bytes = 0
+        self.download_eta_label = None         # 可后续添加到状态栏
+        self._cache_ttl = 300  # 5分钟
+
+    def _apply_volume_from_settings(self):
+        vol = self.settings.get('volume', 60)
+        if hasattr(self, 'slider_volume'):
+            self.slider_volume.setValue(vol)
 
     def _check_deps(self):
         from utils import check_dependencies
@@ -133,15 +202,14 @@ class MusicdlGUI(QWidget):
                 self.close()
                 return
 
-            # 禁用播放控件
             self.btn_play.setEnabled(False)
             self.btn_prev.setEnabled(False)
             self.btn_next.setEnabled(False)
             self.btn_stop.setEnabled(False)
             self.slider_position.setEnabled(False)
             self.label_time.setText("VLC 不可用")
-        # 其他功能（下载、可视化）不受影响
 
+    # ---------- 标题栏 ----------
     def setup_title_bar(self):
         self.title_bar = QWidget(self)
         self.title_bar.setObjectName("titleBar")
@@ -228,6 +296,7 @@ class MusicdlGUI(QWidget):
         self.btn_close.clicked.connect(self.close)
         title_layout.addWidget(self.btn_close)
 
+    # ---------- UI 初始化 ----------
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -241,6 +310,7 @@ class MusicdlGUI(QWidget):
         content_layout.setContentsMargins(15, 10, 15, 15)
         content_layout.setSpacing(10)
 
+        # 歌单解析行
         playlist_layout = QHBoxLayout()
         playlist_layout.addWidget(QLabel("歌单链接:"))
         self.lineedit_playlist = QLineEdit()
@@ -255,7 +325,7 @@ class MusicdlGUI(QWidget):
         playlist_layout.addWidget(self.button_parse_playlist)
         content_layout.addLayout(playlist_layout)
 
-        # ========== 新增：结果工具栏（清空结果按钮） ==========
+        # 结果工具栏
         result_toolbar = QHBoxLayout()
         result_toolbar.setContentsMargins(0, 0, 0, 0)
         self.btn_clear_results = QPushButton("🗑 清空结果")
@@ -263,7 +333,6 @@ class MusicdlGUI(QWidget):
         result_toolbar.addStretch()
         result_toolbar.addWidget(self.btn_clear_results)
         content_layout.addLayout(result_toolbar)
-        # =====================================================
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(3)
@@ -308,21 +377,21 @@ class MusicdlGUI(QWidget):
         self.result_list.itemSelectionChanged.connect(self.on_selection_changed)
         splitter.addWidget(self.result_list)
 
+        # 右侧播放控制组
         play_group = QGroupBox("播放控制")
         play_group.setObjectName("playGroup")
         play_layout = QVBoxLayout(play_group)
 
-        # ========== 新增：播放列表面板 ==========
+        # ---- 播放列表面板 ----
         playlist_container = QWidget()
         playlist_container.setObjectName("playlistContainer")
-        playlist_container.setMinimumHeight(120)   # 保留最小高度，但允许拉伸
+        playlist_container.setMinimumHeight(120)
         playlist_container.setStyleSheet("background: transparent; border: none;")
 
         playlist_vbox = QVBoxLayout(playlist_container)
         playlist_vbox.setContentsMargins(5, 5, 5, 5)
         playlist_vbox.setSpacing(3)
 
-        # 标题栏 + 工具按钮
         header_layout = QHBoxLayout()
         header_layout.setContentsMargins(0, 0, 0, 0)
         self.playlist_title = QLabel("🎵 播放列表 (0)")
@@ -330,7 +399,6 @@ class MusicdlGUI(QWidget):
         header_layout.addWidget(self.playlist_title)
         header_layout.addStretch()
 
-        # 通用按钮样式（减少重复代码）
         button_style = """
             QPushButton {
                 background: transparent;
@@ -371,7 +439,6 @@ class MusicdlGUI(QWidget):
 
         playlist_vbox.addLayout(header_layout)
 
-        # 歌单列表
         self.playlist_widget = QListWidget()
         self.playlist_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.playlist_widget.setStyleSheet("""
@@ -388,7 +455,7 @@ class MusicdlGUI(QWidget):
             }
             QListWidget::item:selected {
                 background: rgba(74, 144, 217, 0.3);
-                color: #2C3E50;   /* 深色文字，保证可读 */
+                color: #2C3E50;
             }
             QListWidget::item:hover {
                 background: rgba(74, 144, 217, 0.1);
@@ -399,6 +466,11 @@ class MusicdlGUI(QWidget):
         self.playlist_widget.customContextMenuRequested.connect(self.show_playlist_context_menu)
         playlist_vbox.addWidget(self.playlist_widget)
 
+        self.playlist_widget.setDragDropMode(QListWidget.InternalMove)
+        self.playlist_widget.setDefaultDropAction(Qt.MoveAction)
+        self.playlist_widget.model().rowsMoved.connect(self._on_playlist_rows_moved)
+
+        # ---- 顶部：封面 + 当前歌曲 ----
         top_layout = QHBoxLayout()
         top_layout.setSpacing(10)
 
@@ -419,6 +491,7 @@ class MusicdlGUI(QWidget):
 
         play_layout.addLayout(top_layout)
 
+        # ---- 歌词 + 播放列表（垂直分割） ----
         self.lyric_display = QListWidget()
         self.lyric_display.itemClicked.connect(self.on_lyric_clicked)
         self.lyric_display.setSelectionMode(QAbstractItemView.NoSelection)
@@ -443,7 +516,7 @@ class MusicdlGUI(QWidget):
                 color: #2C3E50;
             }
             QListWidget::item:hover {
-                background: rgba(74,144,217,0.15);  /* 鼠标悬停效果 */
+                background: rgba(74,144,217,0.15);
             }
             QScrollBar:vertical {
                 background: transparent;
@@ -460,9 +533,6 @@ class MusicdlGUI(QWidget):
             }
         """)
 
-        # ========== 将歌词显示和播放列表放入可拖动分割器 ==========
-
-        # 创建垂直分割器
         splitter_vertical = QSplitter(Qt.Vertical)
         splitter_vertical.setHandleWidth(3)
         splitter_vertical.setStyleSheet("""
@@ -477,18 +547,13 @@ class MusicdlGUI(QWidget):
                                             stop:0 #4A90D9, stop:1 #357ABD);
             }
         """)
-
-        # 将歌词和播放列表加入分割器
         splitter_vertical.addWidget(self.lyric_display)
         splitter_vertical.addWidget(playlist_container)
-
-        # 设置拉伸因子：歌词占3份，播放列表占1份
         splitter_vertical.setStretchFactor(0, 3)
         splitter_vertical.setStretchFactor(1, 1)
-
-        # 将分割器添加到 play_layout（在 top_layout 之后，进度条之前）
         play_layout.addWidget(splitter_vertical)
 
+        # ---- 进度条 ----
         progress_layout = QHBoxLayout()
         self.slider_position = ClickableSlider(Qt.Horizontal, self)
         self.slider_position.setRange(0, 0)
@@ -500,6 +565,7 @@ class MusicdlGUI(QWidget):
         progress_layout.addWidget(self.label_time)
         play_layout.addLayout(progress_layout)
 
+        # ---- 播放控制按钮 ----
         controls_row1 = QHBoxLayout()
         self.btn_prev = QPushButton("⏪")
         self.btn_prev.setObjectName("prevButton")
@@ -519,9 +585,9 @@ class MusicdlGUI(QWidget):
         controls_row1.addWidget(self.btn_next)
         controls_row1.addWidget(self.btn_stop)
         controls_row1.addStretch()
-
         play_layout.addLayout(controls_row1)
 
+        # ---- 第二行控制 ----
         controls_row2 = QHBoxLayout()
         self.btn_visualize = QPushButton("🎨")
         self.btn_visualize.setObjectName("visualizeButton")
@@ -533,7 +599,7 @@ class MusicdlGUI(QWidget):
         controls_row2.addWidget(QLabel("🔊"))
         self.slider_volume = QSlider(Qt.Horizontal)
         self.slider_volume.setRange(0, 100)
-        self.slider_volume.setValue(60)
+        self.slider_volume.setValue(self.settings.get('volume', 60))
         self.slider_volume.setFixedWidth(80)
         controls_row2.addWidget(self.slider_volume)
 
@@ -541,7 +607,7 @@ class MusicdlGUI(QWidget):
         controls_row2.addWidget(QLabel("模式:"))
         self.combo_playmode = QComboBox()
         self.combo_playmode.addItems(["单曲循环", "单曲暂停", "列表循环", "列表暂停"])
-        self.combo_playmode.setCurrentIndex(2)
+        self.combo_playmode.setCurrentIndex(self.settings.get('play_mode', 2))
         self.combo_playmode.currentIndexChanged.connect(self.on_playmode_changed)
         controls_row2.addWidget(self.combo_playmode)
 
@@ -554,6 +620,7 @@ class MusicdlGUI(QWidget):
 
         content_layout.addWidget(splitter, 1)
 
+        # ---- 进度条（下载） ----
         progress_layout2 = QHBoxLayout()
         progress_layout2.addWidget(QLabel("单曲进度:"))
         self.bar_download = QProgressBar()
@@ -570,11 +637,11 @@ class MusicdlGUI(QWidget):
         self.label_stats.setAlignment(Qt.AlignCenter)
         content_layout.addWidget(self.label_stats)
 
+        # ---- 右键菜单 ----
         self.context_menu = QMenu(self)
         self.action_download = self.context_menu.addAction('⬇️ 下载选中')
         self.action_download.setObjectName('downloadAction')
         self.action_download.triggered.connect(self.download_selected)
-        # 新增：添加到歌单
         self.action_add_to_playlist = self.context_menu.addAction('➕ 添加到歌单')
         self.action_add_to_playlist.triggered.connect(self.add_selected_to_playlist)
 
@@ -600,7 +667,6 @@ class MusicdlGUI(QWidget):
         self.download_thread = None
         self.parse_thread = None
         self.music_records = {}
-        self.music_client = None
         self._source_counts = {}
         self._download_queue = []
         self._download_current_index = 0
@@ -630,259 +696,149 @@ class MusicdlGUI(QWidget):
         self.player.mediaStatusChanged.connect(self.handle_media_status)
         self.player.positionChanged.connect(self.update_lyric_display)
 
-    # ==================== 新增歌单管理函数 ====================
-    def add_selected_to_playlist(self):
-        """将结果列表中选中的歌曲添加到歌单（不自动播放）"""
-        rows = self.get_selected_rows()
-        if not rows:
-            QMessageBox.information(self, "提示", "请先在搜索结果中选择歌曲")
+    # ---------- MusicClient 单例管理 ----------
+    def _init_music_client(self):
+        """根据当前设置初始化 MusicClient"""
+        selected_display = self.settings.get('sources', [])
+        selected_sources = []
+        for display in selected_display:
+            internal = SOURCE_INTERNAL.get(display)
+            if internal:
+                selected_sources.append(internal)
+        if not selected_sources:
+            self.music_client = None
             return
-        for row in rows:
-            info = self.get_song_info_by_row(row)
-            if info:
-                self.add_to_playlist(info, play=False)
-        self.update_playlist_widget()
-        self.label_stats.setText(f"已添加 {len(rows)} 首歌曲到歌单")
 
-    def add_to_playlist(self, song_info, play=False):
-        """将一首歌添加到歌单末尾，可选是否立即播放"""
-        if not song_info:
-            return
-        self.playlist.append(song_info)
-        if play:
-            self.current_play_index = len(self.playlist) - 1
-            self.play_current()
-        self.update_playlist_widget()
+        # 为每个源配置参数（开启会话复用）
+        init_cfg = {}
+        for src in selected_sources:
+            init_cfg[src] = {
+                'search_size_per_source': self.settings.get('limit', 10),
+                'maintain_session': True,
+                'disable_print': True,
+                # 可继续添加: search_size_per_page, max_retries 等
+            }
 
-    def update_playlist_widget(self):
-        """刷新歌单列表显示"""
-        self.playlist_widget.clear()
-        for idx, info in enumerate(self.playlist):
-            name = info.get('song_name', '未知歌曲')
-            singer = info.get('singers', '未知歌手')
-            text = f"{idx+1}. {singer} - {name}"
-            item = QListWidgetItem(text)
-            item.setData(Qt.UserRole, idx)  # 存储索引
-            self.playlist_widget.addItem(item)
-        count = len(self.playlist)
-        self.playlist_title.setText(f"🎵 播放列表 ({count})")
-        self.playlist_title.setToolTip(f"共 {count} 首歌曲")
-
-    def play_playlist_item(self, item):
-        """双击歌单项播放"""
-        idx = item.data(Qt.UserRole)
-        if idx is not None and 0 <= idx < len(self.playlist):
-            self.current_play_index = idx
-            self.play_current()
-
-    def show_playlist_context_menu(self, pos):
-        menu = QMenu(self)
-        play_action = menu.addAction("▶ 播放")
-        remove_action = menu.addAction("❌ 移除选中")
-        clear_action = menu.addAction("🗑 清空")
-        menu.addSeparator()
-        move_up_action = menu.addAction("⬆ 上移")
-        move_down_action = menu.addAction("⬇ 下移")
-        action = menu.exec_(self.playlist_widget.mapToGlobal(pos))
-        if not action:
-            return
-        selected_items = self.playlist_widget.selectedItems()
-        if not selected_items:
-            QMessageBox.information(self, "提示", "请先选择歌单中的歌曲")
-            return
-        indices = [item.data(Qt.UserRole) for item in selected_items if item.data(Qt.UserRole) is not None]
-        if action == play_action:
-            if indices:
-                self.current_play_index = indices[0]
-                self.play_current()
-        elif action == remove_action:
-            # 从高到低删除，避免索引错乱
-            for idx in sorted(indices, reverse=True):
-                if 0 <= idx < len(self.playlist):
-                    del self.playlist[idx]
-            self.current_play_index = -1  # 重置当前播放索引
-            self.update_playlist_widget()
-            self.stop_playback()
-        elif action == clear_action:
-            self.playlist.clear()
-            self.current_play_index = -1
-            self.update_playlist_widget()
-            self.stop_playback()
-        elif action == move_up_action:
-            # 只处理第一个选中项
-            idx = indices[0]
-            if idx > 0 and idx < len(self.playlist):
-                self.playlist[idx], self.playlist[idx-1] = self.playlist[idx-1], self.playlist[idx]
-                if self.current_play_index == idx:
-                    self.current_play_index = idx - 1
-                elif self.current_play_index == idx - 1:
-                    self.current_play_index = idx
-                self.update_playlist_widget()
-        elif action == move_down_action:
-            idx = indices[0]
-            if 0 <= idx < len(self.playlist) - 1:
-                self.playlist[idx], self.playlist[idx+1] = self.playlist[idx+1], self.playlist[idx]
-                if self.current_play_index == idx:
-                    self.current_play_index = idx + 1
-                elif self.current_play_index == idx + 1:
-                    self.current_play_index = idx
-                self.update_playlist_widget()
-
-    def _sanitize_song_info(self, song_info):
-        """将 song_info 转换为轻量级可序列化字典，仅保留必要字段"""
-        if not isinstance(song_info, dict):
-            # 如果是对象，尝试提取 __dict__
-            if hasattr(song_info, '__dict__'):
-                song_info = {k: v for k, v in vars(song_info).items() if not k.startswith('_')}
-            else:
-                song_info = {}
-
-        # 定义需要保留的字段（这些是播放/下载/显示必需的）
-        keep_keys = [
-            'song_name', 'singers', 'album', 'ext', 'duration', 'duration_s',
-            'cover_url', 'lyric', 'download_url', 'source', 'file_size', 'file_size_bytes'
-        ]
-        clean = {}
-        for key in keep_keys:
-            if key in song_info:
-                val = song_info[key]
-                # 确保值可 JSON 序列化
-                if isinstance(val, (str, int, float, bool, list, dict, type(None))):
-                    clean[key] = val
-                else:
-                    clean[key] = str(val)
-
-        # 确保核心字段存在（防止缺失）
-        clean.setdefault('song_name', song_info.get('song_name', '未知歌曲'))
-        clean.setdefault('singers', song_info.get('singers', '未知歌手'))
-        clean.setdefault('download_url', song_info.get('download_url', ''))
-        return clean
-
-    def _encrypt_playlist_data(self, data: bytes) -> str:
-        """使用预设密钥加密数据，返回 base64 字符串"""
         try:
-            key = base64.urlsafe_b64encode(hashlib.sha256(ENCRYPTION_PASSWORD.encode()).digest())
-            f = Fernet(key)
-            encrypted = f.encrypt(data)
-            return base64.b64encode(encrypted).decode('ascii')
+            self.music_client = musicdl.MusicClient(
+                music_sources=selected_sources,
+                init_music_clients_cfg=init_cfg,
+                # 统一线程数
+                clients_threadings={src: 5 for src in selected_sources}
+            )
+            logger.info(f"MusicClient 初始化成功，源: {selected_sources}")
         except Exception as e:
-            QMessageBox.critical(self, "加密错误", f"加密失败: {str(e)}")
+            logger.error(f"MusicClient 初始化失败: {e}", exc_info=True)
+            QMessageBox.critical(self, "初始化失败", f"无法创建音乐客户端：{str(e)}")
+            self.music_client = None
+
+    # ---------- 刷新链接（核心） ----------
+    def refresh_song_url(self, song_info: Dict) -> Optional[Dict]:
+        """
+        检查并刷新歌曲的 download_url。
+        使用独立的临时客户端和固定条数（REFRESH_SEARCH_SIZE），
+        完全不受全局设置控制。
+        """
+        identifier = song_info.get('identifier') or song_info.get('song_id')
+        if not identifier:
+            logger.warning("缺少 identifier，无法刷新链接")
             return None
 
-    def _decrypt_playlist_data(self, encrypted_b64: str) -> bytes:
-        """使用预设密钥解密数据，返回原始字节"""
-        try:
-            key = base64.urlsafe_b64encode(hashlib.sha256(ENCRYPTION_PASSWORD.encode()).digest())
-            f = Fernet(key)
-            encrypted = base64.b64decode(encrypted_b64)
-            return f.decrypt(encrypted)
-        except Exception as e:
-            raise Exception("解密失败，数据可能已损坏或密钥不匹配") from e
+        # 1. 检查缓存（5分钟有效）
+        cached = self._url_cache.get(identifier)
+        if cached:
+            cached_url, cache_time = cached
+            if time.time() - cache_time < self._cache_ttl:
+                if cached_url != song_info.get('download_url'):
+                    song_info['download_url'] = cached_url
+                    logger.debug(f"使用缓存的链接: {identifier}")
+                return song_info
 
-    def save_playlist(self):
-        if not self.playlist:
-            QMessageBox.information(self, "提示", "歌单为空，无需保存")
-            return
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "保存歌单", "",
-            "JSON Files (*.json);;All Files (*.*)"
-        )
-        if not file_path:
-            return
-
-        # 转换歌单为可序列化列表
-        serializable_list = [self._sanitize_song_info(item) for item in self.playlist]
-        json_str = json.dumps(serializable_list, ensure_ascii=False, indent=2)
-
-        # 加密保存
-        encrypted_b64 = self._encrypt_playlist_data(json_str.encode('utf-8'))
-        if encrypted_b64 is None:
-            return
-        try:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write("ENCRYPTED:" + encrypted_b64)
-            self.label_stats.setText(f"歌单已加密保存至 {file_path}")
-        except Exception as e:
-            QMessageBox.critical(self, "保存失败", f"写入文件失败: {str(e)}")
-
-    def load_playlist(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "加载歌单", "",
-            "JSON Files (*.json);;All Files (*.*)"
-        )
-        if not file_path:
-            return
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-        except Exception as e:
-            QMessageBox.critical(self, "读取失败", str(e))
-            return
-
-        # 检查是否为加密格式
-        if content.startswith("ENCRYPTED:"):
-            encrypted_b64 = content[len("ENCRYPTED:"):]
+        url = song_info.get('download_url', '')
+        # 2. 快速 HEAD 验证（仅当链接不含明显过期关键词时）
+        if url and 'expires' not in url and 'sign' not in url:
             try:
-                decrypted_bytes = self._decrypt_playlist_data(encrypted_b64)
-                data = json.loads(decrypted_bytes.decode('utf-8'))
-            except Exception as e:
-                QMessageBox.critical(self, "解密失败", str(e))
-                return
-        else:
-            # 兼容旧版明文 JSON
-            try:
-                data = json.loads(content)
-            except Exception as e:
-                QMessageBox.critical(self, "解析失败", f"无效的JSON格式: {str(e)}")
-                return
+                head_resp = requests.head(url, timeout=3, allow_redirects=False)
+                if head_resp.status_code < 400:
+                    self._url_cache[identifier] = (url, time.time())
+                    return song_info
+            except Exception:
+                pass  # 继续刷新
 
-        if not isinstance(data, list):
-            QMessageBox.critical(self, "加载失败", "无效的歌单格式，应为数组")
-            return
+        # 3. 获取源并准备搜索
+        source = song_info.get('source')
+        if not source:
+            logger.warning(f"缺少 source，无法刷新: {identifier}")
+            return None
 
-        self.playlist = data
-        self.current_play_index = -1
-        self.update_playlist_widget()
-        self.label_stats.setText(f"已加载歌单，共 {len(self.playlist)} 首歌曲")
-    # ========================================================
+        keyword = f"{song_info.get('singers', '')} {song_info.get('song_name', '')}".strip()
+        if not keyword:
+            logger.warning(f"无关键词，无法刷新: {identifier}")
+            return None
 
-    def open_settings(self):
-        dlg = SettingsDialog(None)
-        dlg.setWindowModality(Qt.ApplicationModal)
+        # ===== 核心改动：始终创建临时客户端，使用 REFRESH_SEARCH_SIZE =====
+        try:
+            from musicdl import musicdl
+            temp_client = musicdl.MusicClient(
+                music_sources=[source],
+                init_music_clients_cfg={
+                    source: {
+                        'search_size_per_source': REFRESH_SEARCH_SIZE,
+                        'disable_print': True,
+                        'maintain_session': False,  # 用完即弃
+                    }
+                }
+            )
+            client = temp_client.music_clients.get(source)
+        except Exception as e:
+            logger.error(f"创建临时客户端失败: {e}")
+            return None
 
-        dlg.spin_limit.setValue(self.settings['limit'])
-        dlg.check_dedup.setChecked(self.settings['dedup'])
-        dlg.path_edit.setText(self.settings['save_dir'])
-        dlg.format_combo.setCurrentText(self.settings['filename_format'])
-        dlg.format_custom_edit.setText(self.settings['custom_format'])
-        dlg.check_lyric.setChecked(self.settings['download_lyric'])
-        dlg.check_cover.setChecked(self.settings['download_cover'])
-        for cb in dlg.source_checkboxes:
-            cb.setChecked(cb.text() in self.settings['sources'])
+        if not client:
+            return None
 
-        parent_geo = self.geometry()
-        dlg.move(
-            parent_geo.x() + (parent_geo.width() - 620) // 2,
-            parent_geo.y() + (parent_geo.height() - 330) // 2
-        )
+        try:
+            results = client.search(keyword, num_threadings=1)
+        except Exception as e:
+            logger.error(f"刷新搜索失败: {e}")
+            return None
+        finally:
+            # 清理临时客户端引用（帮助垃圾回收）
+            temp_client = None
 
-        if dlg.exec_() == QDialog.Accepted:
-            new_settings = dlg.get_settings()
-            self.settings.update(new_settings)
-            self.label_stats.setText("设置已更新")
+        # 匹配 identifier（只取前 REFRESH_SEARCH_SIZE 条，但实际搜索已限制）
+        matched = None
+        for item in results[:REFRESH_SEARCH_SIZE]:
+            if item.get('identifier') == identifier:
+                matched = item
+                break
+        if not matched and results:
+            matched = results[0]  # 降级取第一条
 
-    def show_about(self):
-        QMessageBox.about(self, "关于",
-            "🎵 cYy Music Client\n"
-            "基于 PyQt5 + musicdl\n"
-            "版本 4.3.0\n"
-            "本程序遵循 GNU 3.0 开源协议\n"
-            "© 2026 cYy"
-        )
+        if not matched:
+            logger.warning(f"未找到匹配歌曲: {identifier}")
+            return None
 
-    def cover_click(self, event):
-        self.show_visualization()
+        new_url = matched.get('download_url') or matched.get('url')
+        if not new_url:
+            return None
 
+        # 更新 song_info 和缓存
+        song_info['download_url'] = new_url
+        if matched.get('cover_url'):
+            song_info['cover_url'] = matched['cover_url']
+        if matched.get('duration'):
+            song_info['duration'] = matched['duration']
+        if matched.get('lyric'):
+            song_info['lyric'] = matched['lyric']
+        if matched.get('ext'):
+            song_info['ext'] = matched['ext']
+
+        self._url_cache[identifier] = (new_url, time.time())
+        logger.info(f"链接刷新成功: {identifier}")
+        return song_info
+
+    # ---------- 搜索功能 ----------
     def on_search_or_stop(self):
         if self.is_parsing:
             self._show_warning('提示', '正在解析歌单，请稍后再试')
@@ -893,17 +849,8 @@ class MusicdlGUI(QWidget):
             self.stop_search()
 
     def start_search(self):
-        selected_display = self.settings.get('sources', [])
-        if not selected_display:
+        if not self.music_client:
             QMessageBox.warning(self, '警告', '请先在设置中选择搜索源')
-            return
-        selected_sources = []
-        for display in selected_display:
-            internal = SOURCE_INTERNAL.get(display)
-            if internal:
-                selected_sources.append(internal)
-        if not selected_sources:
-            QMessageBox.warning(self, '警告', '未找到有效的搜索源')
             return
 
         keyword = self.search_input.text().strip()
@@ -911,29 +858,13 @@ class MusicdlGUI(QWidget):
             QMessageBox.warning(self, '警告', '请输入关键词')
             return
 
-        limit = self.settings.get('limit', 5)
-        dedup = self.settings.get('dedup', False)
-
         self.clear_results()
-
-        init_cfg = {}
-        for src in selected_sources:
-            init_cfg[src] = {'search_size_per_source': limit}
-
-        try:
-            self.music_client = musicdl.MusicClient(
-                music_sources=selected_sources,
-                init_music_clients_cfg=init_cfg
-            )
-        except Exception as e:
-            QMessageBox.critical(self, '初始化失败', f'无法创建音乐客户端：{str(e)}')
-            return
 
         self.search_task_counter += 1
         self.current_search_task_id = self.search_task_counter
 
-        self.label_stats.setText(f'⏳ 搜索中 (0/{len(selected_sources)}) ...')
-        self._source_counts = {src: -1 for src in selected_sources}
+        self.label_stats.setText('⏳ 搜索中...')
+        self._source_counts = {}
 
         self._set_ui_enabled(False)
         self.btn_search_title.setText('⏹')
@@ -942,21 +873,45 @@ class MusicdlGUI(QWidget):
 
         self.search_thread = SearchThread(
             self.music_client,
-            selected_sources,
             keyword,
-            limit,
-            task_id=self.current_search_task_id,
-            threadings_per_source=5,
+            task_id=self.current_search_task_id
         )
-        self.search_thread.source_started.connect(self.on_source_started)
-        self.search_thread.source_finished.connect(self.on_source_finished)
-        self.search_thread.finished.connect(self.on_search_finished)
-        self.search_thread.error.connect(self.on_search_error)
+        self.search_thread.result_ready.connect(self._on_result_ready)   # 新增
+        self.search_thread.source_done.connect(self._on_source_done)     # 替换原来的 source_finished
+        self.search_thread.source_error.connect(self.on_search_error)
+        self.search_thread.all_done.connect(self._on_search_all_done)    # 替换原来的 finished
         self.search_thread.start()
+
+    def _on_result_ready(self, task_id, source, song_info):
+        if task_id != self.current_search_task_id:
+            return
+        # 直接添加卡片，无需等待源完成
+        display = self._internal_to_display(source)
+        self.add_song_card(song_info, display)
+        total = self.result_list.count()
+        self.label_stats.setText(f'⏳ 搜索中... 已找到 {total} 首')
+
+    def _on_source_done(self, task_id, source, count):
+        if task_id != self.current_search_task_id:
+            return
+        display = self._internal_to_display(source)
+        self.label_stats.setText(f'✅ {display} 完成，共 {count} 首')
+
+    def _on_search_all_done(self, task_id):
+        if task_id != self.current_search_task_id:
+            return
+        self.search_in_progress = False
+        self.finish_search()
+        total = self.result_list.count()
+        self.label_stats.setText(f'✅ 搜索完成，共 {total} 条结果')
+        if self.search_thread:
+            self.search_thread.deleteLater()
+            self.search_thread = None
 
     def stop_search(self):
         if self.search_in_progress:
-            safe_stop_thread(self.search_thread, ['source_started', 'source_finished', 'error'],
+            safe_stop_thread(self.search_thread, 
+                             ['result_ready', 'source_done', 'source_error', 'all_done'],
                              self._on_search_thread_finished_cleanup)
             self.search_in_progress = False
             self._set_ui_enabled(True)
@@ -987,28 +942,6 @@ class MusicdlGUI(QWidget):
         if self.result_list.count() == 0:
             self.label_stats.setText('已停止搜索')
 
-    def _on_parse_thread_finished_cleanup(self):
-        if self.parse_thread is None:
-            return
-        try:
-            self.parse_thread.finished.disconnect(self._on_parse_thread_finished_cleanup)
-        except TypeError:
-            pass
-        if self.parse_thread and self.parse_thread.isRunning():
-            self.parse_thread.wait()
-        if self.parse_thread:
-            self.parse_thread.deleteLater()
-            self.parse_thread = None
-        self.is_parsing = False
-        self._set_ui_enabled(True)
-        self.button_parse_playlist.setEnabled(True)
-        self.button_parse_playlist.setText('📋 解析歌单')
-        if self.parse_progress:
-            self.parse_progress.close()
-            self.parse_progress = None
-        if self.label_stats.text().startswith('⏹ 正在停止解析'):
-            self.label_stats.setText('已停止解析')
-
     def _set_ui_enabled(self, enabled: bool):
         self.search_input.setEnabled(enabled)
         self.btn_search_title.setEnabled(True)
@@ -1029,12 +962,6 @@ class MusicdlGUI(QWidget):
             if not self.label_stats.text().startswith('❌'):
                 self.label_stats.setText('❌ 未找到任何结果')
 
-    def on_source_started(self, task_id: int, source_internal: str):
-        if task_id != self.current_search_task_id:
-            return
-        display = self._internal_to_display(source_internal)
-        self.label_stats.setText(f'⏳ 正在搜索 {display} ...')
-
     def on_source_finished(self, task_id, source_internal, results):
         if task_id != self.current_search_task_id:
             return
@@ -1053,6 +980,9 @@ class MusicdlGUI(QWidget):
 
         added = 0
         for info in results:
+            # 确保 info 包含 source 和 identifier
+            if not info.get('source'):
+                info['source'] = source_internal
             if dedup:
                 key = (info.get('singers', ''), info.get('song_name', ''))
                 if key in existing:
@@ -1097,6 +1027,7 @@ class MusicdlGUI(QWidget):
                 return k
         return internal
 
+    # ---------- 歌单解析 ----------
     def parse_playlist(self):
         if self.search_in_progress:
             self._show_warning('提示', '正在搜索中，请稍后再试')
@@ -1119,6 +1050,23 @@ class MusicdlGUI(QWidget):
             QMessageBox.warning(self, '警告', '请选择有效的歌单平台')
             return
 
+        if not self.music_client:
+            QMessageBox.warning(self, '警告', '音乐客户端未初始化，请先设置搜索源')
+            return
+
+        # 检查该源是否已初始化
+        if source_internal not in self.music_client.music_clients:
+            reply = QMessageBox.question(
+                self, "源未启用",
+                f"当前设置未启用 {source_display}，是否临时启用并解析？",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                # 临时加入源
+                self._add_source_temp(source_internal)
+            else:
+                return
+
         self.parse_progress = QProgressDialog("正在解析歌单，请稍候...", "取消", 0, 0, self)
         self.parse_progress.setWindowTitle("歌单解析")
         self.parse_progress.setModal(True)
@@ -1137,6 +1085,7 @@ class MusicdlGUI(QWidget):
         self.label_stats.setText('⏳ 正在解析歌单...')
 
         self.parse_thread = PlaylistParseThread(
+            self.music_client,
             playlist_url,
             source_internal,
             source_display,
@@ -1146,6 +1095,18 @@ class MusicdlGUI(QWidget):
         self.parse_thread.parse_finished.connect(self._on_parse_finished)
         self.parse_thread.parse_error.connect(self._on_parse_error)
         self.parse_thread.start()
+
+    def _add_source_temp(self, source_internal: str):
+        """临时添加一个源到现有客户端（需要重建）"""
+        current_sources = list(self.music_client.music_clients.keys())
+        if source_internal not in current_sources:
+            current_sources.append(source_internal)
+            # 重建客户端
+            display = self._internal_to_display(source_internal)
+            if display not in self.settings['sources']:
+                self.settings['sources'].append(display)
+                save_settings(self.settings)
+            self._init_music_client()
 
     def stop_parse(self):
         if self.is_parsing:
@@ -1210,7 +1171,33 @@ class MusicdlGUI(QWidget):
             self.parse_thread.deleteLater()
             self.parse_thread = None
 
+    def _on_parse_thread_finished_cleanup(self):
+        if self.parse_thread is None:
+            return
+        try:
+            self.parse_thread.finished.disconnect(self._on_parse_thread_finished_cleanup)
+        except TypeError:
+            pass
+        if self.parse_thread and self.parse_thread.isRunning():
+            self.parse_thread.wait()
+        if self.parse_thread:
+            self.parse_thread.deleteLater()
+            self.parse_thread = None
+        self.is_parsing = False
+        self._set_ui_enabled(True)
+        self.button_parse_playlist.setEnabled(True)
+        self.button_parse_playlist.setText('📋 解析歌单')
+        if self.parse_progress:
+            self.parse_progress.close()
+            self.parse_progress = None
+        if self.label_stats.text().startswith('⏹ 正在停止解析'):
+            self.label_stats.setText('已停止解析')
+
+    # ---------- 结果列表管理 ----------
     def add_song_card(self, song_info, source_display=None):
+        # 确保 source 字段存在
+        if not song_info.get('source') and source_display:
+            song_info['source'] = SOURCE_INTERNAL.get(source_display)
         row = self.result_list.count()
         item = QListWidgetItem()
         item.setSizeHint(QSize(0, 110))
@@ -1241,23 +1228,314 @@ class MusicdlGUI(QWidget):
         self.music_records.clear()
         self.label_stats.setText('已清空')
         self._source_counts.clear()
-        # 不再清空歌单（独立管理）
-        # self.playlist = []          # 删除
-        # self.current_play_index = -1 # 删除
-        # self.stop_playback()        # 保留？清空结果不应该停止播放，除非想停止，但为了用户体验，保留播放状态，但我们保留停止播放以避免卡住？改为不停止，但若播放列表为空则停止
-        if not self.playlist:
-            self.stop_playback()
 
     def on_list_double_click(self, item):
         row = self.result_list.row(item)
         info = self.get_song_info_by_row(row)
         if info:
-            self.add_to_playlist(info, play=True)   # 加入歌单并立即播放
+            self.add_to_playlist(info, play=True)
 
     def show_context_menu(self, pos):
         if not self.is_downloading and self.result_list.count() > 0 and self.result_list.selectedItems():
             self.context_menu.exec_(self.result_list.mapToGlobal(pos))
 
+    # ---------- 歌单管理 ----------
+    def add_selected_to_playlist(self):
+        rows = self.get_selected_rows()
+        if not rows:
+            QMessageBox.information(self, "提示", "请先在搜索结果中选择歌曲")
+            return
+        for row in rows:
+            info = self.get_song_info_by_row(row)
+            if info:
+                self.add_to_playlist(info, play=False)
+        self.update_playlist_widget()
+        self.label_stats.setText(f"已添加 {len(rows)} 首歌曲到歌单")
+
+    def add_to_playlist(self, song_info, play=False):
+        if not song_info:
+            return
+        # 确保有 identifier（若无则用 song_id）
+        if 'identifier' not in song_info and 'song_id' in song_info:
+            song_info['identifier'] = song_info['song_id']
+        self.playlist.append(song_info)
+        if play:
+            self.current_play_index = len(self.playlist) - 1
+            self.play_current()
+        self.update_playlist_widget()
+
+    def update_playlist_widget(self):
+        self.playlist_widget.clear()
+        for idx, info in enumerate(self.playlist):
+            name = info.get('song_name', '未知歌曲')
+            singer = info.get('singers', '未知歌手')
+            text = f"{idx+1}. {singer} - {name}"
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, idx)
+            self.playlist_widget.addItem(item)
+        count = len(self.playlist)
+        self.playlist_title.setText(f"🎵 播放列表 ({count})")
+        self.playlist_title.setToolTip(f"共 {count} 首歌曲")
+
+    def play_playlist_item(self, item):
+        idx = item.data(Qt.UserRole)
+        if idx is not None and 0 <= idx < len(self.playlist):
+            self.current_play_index = idx
+            self.play_current()
+
+    def show_playlist_context_menu(self, pos):
+        menu = QMenu(self)
+        play_action = menu.addAction("▶ 播放")
+        remove_action = menu.addAction("❌ 移除选中")
+        clear_action = menu.addAction("🗑 清空")
+        menu.addSeparator()
+        move_up_action = menu.addAction("⬆ 上移")
+        move_down_action = menu.addAction("⬇ 下移")
+        action = menu.exec_(self.playlist_widget.mapToGlobal(pos))
+        if not action:
+            return
+        selected_items = self.playlist_widget.selectedItems()
+        if not selected_items:
+            QMessageBox.information(self, "提示", "请先选择歌单中的歌曲")
+            return
+        indices = [item.data(Qt.UserRole) for item in selected_items if item.data(Qt.UserRole) is not None]
+        if action == play_action:
+            if indices:
+                self.current_play_index = indices[0]
+                self.play_current()
+        elif action == remove_action:
+            for idx in sorted(indices, reverse=True):
+                if 0 <= idx < len(self.playlist):
+                    del self.playlist[idx]
+            self.current_play_index = -1
+            self.update_playlist_widget()
+            self.stop_playback()
+        elif action == clear_action:
+            self.playlist.clear()
+            self.current_play_index = -1
+            self.update_playlist_widget()
+            self.stop_playback()
+        elif action == move_up_action:
+            idx = indices[0]
+            if idx > 0 and idx < len(self.playlist):
+                self.playlist[idx], self.playlist[idx-1] = self.playlist[idx-1], self.playlist[idx]
+                if self.current_play_index == idx:
+                    self.current_play_index = idx - 1
+                elif self.current_play_index == idx - 1:
+                    self.current_play_index = idx
+                self.update_playlist_widget()
+        elif action == move_down_action:
+            idx = indices[0]
+            if 0 <= idx < len(self.playlist) - 1:
+                self.playlist[idx], self.playlist[idx+1] = self.playlist[idx+1], self.playlist[idx]
+                if self.current_play_index == idx:
+                    self.current_play_index = idx + 1
+                elif self.current_play_index == idx + 1:
+                    self.current_play_index = idx
+                self.update_playlist_widget()
+
+    def _on_playlist_rows_moved(self, source_parent, source_start, source_end, dest_parent, dest_row):
+        """当用户拖拽播放列表项后，同步 playlist 列表顺序"""
+        # 重建 playlist 根据当前视图顺序
+        new_playlist = []
+        for i in range(self.playlist_widget.count()):
+            item = self.playlist_widget.item(i)
+            idx = item.data(Qt.UserRole)
+            if idx is not None and 0 <= idx < len(self.playlist):
+                new_playlist.append(self.playlist[idx])
+        self.playlist = new_playlist
+        # 更新 current_play_index（若当前歌曲存在，重新定位）
+        if self.current_play_index != -1 and self.current_play_index < len(self.playlist):
+            current_song = self.playlist[self.current_play_index]
+            new_idx = -1
+            for i, song in enumerate(self.playlist):
+                if song.get('identifier') == current_song.get('identifier'):
+                    new_idx = i
+                    break
+            if new_idx != -1:
+                self.current_play_index = new_idx
+            else:
+                self.current_play_index = -1
+        # 刷新标题计数
+        self.update_playlist_widget()
+
+    # ---------- 歌单保存/加载（加密+明文） ----------
+    def _sanitize_song_info(self, song_info):
+        """将 song_info 转换为轻量级可序列化字典，保留 identifier 和 source"""
+        if not isinstance(song_info, dict):
+            if hasattr(song_info, '__dict__'):
+                song_info = {k: v for k, v in vars(song_info).items() if not k.startswith('_')}
+            else:
+                song_info = {}
+
+        keep_keys = [
+            'song_name', 'singers', 'album', 'ext', 'duration', 'duration_s',
+            'cover_url', 'lyric', 'download_url', 'source',
+            'identifier', 'song_id', 'file_size', 'file_size_bytes'
+        ]
+        clean = {}
+        for key in keep_keys:
+            if key in song_info:
+                val = song_info[key]
+                if isinstance(val, (str, int, float, bool, list, dict, type(None))):
+                    clean[key] = val
+                else:
+                    clean[key] = str(val)
+
+        clean.setdefault('song_name', song_info.get('song_name', '未知歌曲'))
+        clean.setdefault('singers', song_info.get('singers', '未知歌手'))
+        clean.setdefault('download_url', song_info.get('download_url', ''))
+        # 确保 identifier 存在
+        if 'identifier' not in clean and 'song_id' in clean:
+            clean['identifier'] = clean['song_id']
+        return clean
+
+    def _encrypt_playlist_data(self, data: bytes) -> str:
+        try:
+            key = base64.urlsafe_b64encode(hashlib.sha256(ENCRYPTION_PASSWORD.encode()).digest())
+            f = Fernet(key)
+            encrypted = f.encrypt(data)
+            return base64.b64encode(encrypted).decode('ascii')
+        except Exception as e:
+            QMessageBox.critical(self, "加密错误", f"加密失败: {str(e)}")
+            return None
+
+    def _decrypt_playlist_data(self, encrypted_b64: str) -> bytes:
+        try:
+            key = base64.urlsafe_b64encode(hashlib.sha256(ENCRYPTION_PASSWORD.encode()).digest())
+            f = Fernet(key)
+            encrypted = base64.b64decode(encrypted_b64)
+            return f.decrypt(encrypted)
+        except Exception as e:
+            raise Exception("解密失败，数据可能已损坏或密钥不匹配") from e
+
+    def save_playlist(self):
+        if not self.playlist:
+            QMessageBox.information(self, "提示", "歌单为空，无需保存")
+            return
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "保存歌单", "",
+            "JSON Files (*.json);;All Files (*.*)"
+        )
+        if not file_path:
+            return
+
+        serializable_list = [self._sanitize_song_info(item) for item in self.playlist]
+        json_str = json.dumps(serializable_list, ensure_ascii=False, indent=2)
+
+        modifiers = QApplication.keyboardModifiers()
+        if modifiers & Qt.ShiftModifier:
+            try:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(json_str)
+                self.label_stats.setText(f"歌单已明文保存至 {file_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "保存失败", f"写入文件失败: {str(e)}")
+        else:
+            encrypted_b64 = self._encrypt_playlist_data(json_str.encode('utf-8'))
+            if encrypted_b64 is None:
+                return
+            try:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write("ENCRYPTED:" + encrypted_b64)
+                self.label_stats.setText(f"歌单已加密保存至 {file_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "保存失败", f"写入文件失败: {str(e)}")
+
+    def load_playlist(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "加载歌单", "",
+            "JSON Files (*.json);;All Files (*.*)"
+        )
+        if not file_path:
+            return
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except Exception as e:
+            QMessageBox.critical(self, "读取失败", str(e))
+            return
+
+        if content.startswith("ENCRYPTED:"):
+            encrypted_b64 = content[len("ENCRYPTED:"):]
+            try:
+                decrypted_bytes = self._decrypt_playlist_data(encrypted_b64)
+                data = json.loads(decrypted_bytes.decode('utf-8'))
+            except Exception as e:
+                QMessageBox.critical(self, "解密失败", str(e))
+                return
+        else:
+            try:
+                data = json.loads(content)
+            except Exception as e:
+                QMessageBox.critical(self, "解析失败", f"无效的JSON格式: {str(e)}")
+                return
+
+        if not isinstance(data, list):
+            QMessageBox.critical(self, "加载失败", "无效的歌单格式，应为数组")
+            return
+
+        # 加载时，对每个 song_info 补充缺失字段，并尝试刷新链接（可选）
+        self.playlist = data
+        self.current_play_index = -1
+        self.update_playlist_widget()
+        self.label_stats.setText(f"已加载歌单，共 {len(self.playlist)} 首歌曲")
+        # 可选项：在加载后自动刷新所有链接（耗时，不宜自动做），用户点击播放时再刷新。
+
+    # ---------- 设置对话框 ----------
+    def open_settings(self):
+        dlg = SettingsDialog(None)
+        dlg.setWindowModality(Qt.ApplicationModal)
+
+        # 原有设置
+        dlg.spin_limit.setValue(self.settings.get('limit', 10))
+        dlg.check_dedup.setChecked(self.settings.get('dedup', False))
+        dlg.path_edit.setText(self.settings.get('save_dir', DEFAULT_SAVE_DIR))
+        dlg.format_combo.setCurrentText(self.settings.get('filename_format', '歌手-歌曲名'))
+        dlg.format_custom_edit.setText(self.settings.get('custom_format', ''))
+        dlg.check_lyric.setChecked(self.settings.get('download_lyric', True))
+        dlg.check_cover.setChecked(self.settings.get('download_cover', True))
+
+        # 搜索源复选框
+        for cb in dlg.source_checkboxes:
+            cb.setChecked(cb.text() in self.settings.get('sources', []))
+
+        # ===== 新增：加载格式转换设置 =====
+        dlg.convert_check.setChecked(self.settings.get('convert_enabled', False))
+        dlg.convert_combo.setCurrentText(self.settings.get('convert_format', ''))
+        dlg.bitrate_combo.setCurrentText(self.settings.get('convert_bitrate', ''))
+        # 根据启用状态更新控件启用/禁用（因为 toggled 信号只在用户交互时触发）
+        dlg.convert_combo.setEnabled(dlg.convert_check.isChecked())
+        dlg.bitrate_combo.setEnabled(dlg.convert_check.isChecked())
+
+        parent_geo = self.geometry()
+        dlg.move(
+            parent_geo.x() + (parent_geo.width() - 620) // 2,
+            parent_geo.y() + (parent_geo.height() - 330) // 2
+        )
+
+        if dlg.exec_() == QDialog.Accepted:
+            new_settings = dlg.get_settings()
+            self.settings.update(new_settings)
+            save_settings(self.settings)
+            self._init_music_client()
+            self._apply_volume_from_settings()
+            self.label_stats.setText("设置已更新并保存")
+
+    # ---------- 其他UI ----------
+    def show_about(self):
+        QMessageBox.about(self, "关于",
+            "🎵 cYy Music Client\n"
+            "基于 PyQt5 + musicdl\n"
+            "版本 4.4.1\n"
+            "本程序遵循 GNU 3.0 开源协议\n"
+            "© 2026 cYy"
+        )
+
+    def cover_click(self, event):
+        self.show_visualization()
+
+    # ---------- 下载功能 ----------
     def download_selected(self):
         if self.is_downloading:
             QMessageBox.information(self, '提示', '正在下载中，请稍候...')
@@ -1272,10 +1550,14 @@ class MusicdlGUI(QWidget):
         for row in sorted(selected_rows):
             row_key = str(row)
             info = self.music_records.get(row_key)
-            if info and info.get('download_url'):
-                songs_to_download.append(info)
+            if info:
+                refreshed = self.refresh_song_url(info)
+                if refreshed:
+                    songs_to_download.append(refreshed)
+                else:
+                    QMessageBox.warning(self, '警告', f'第 {row+1} 首歌曲链接失效且无法刷新，已跳过')
             else:
-                QMessageBox.warning(self, '警告', f'第 {row+1} 首歌曲无有效下载链接，已跳过')
+                QMessageBox.warning(self, '警告', f'第 {row+1} 首歌曲信息缺失，已跳过')
 
         if not songs_to_download:
             return
@@ -1292,25 +1574,75 @@ class MusicdlGUI(QWidget):
                 return
         self._download_cancelled = False
 
-        fmt = self._get_filename_template()
-        dl_lyric = self.settings['download_lyric']
-        dl_cover = self.settings['download_cover']
+        # 重置下载队列和状态
+        self.download_queue = songs_to_download.copy()
+        self.active_downloads.clear()
+        self.download_completed = 0
+        self.download_start_time = time.time()
+        self.download_done_bytes = 0
+        # 估算总大小（若没有 file_size_bytes，则用 5MB 估算）
+        self.download_total_bytes = sum(
+            int(info.get('file_size_bytes', 0)) or 0 for info in self.download_queue
+        )
+        if self.download_total_bytes == 0:
+            self.download_total_bytes = len(self.download_queue) * 5 * 1024 * 1024
 
         self.is_downloading = True
         self._set_ui_enabled(False)
         self.result_list.setEnabled(False)
         self.action_download.setEnabled(False)
 
-        self._download_queue = songs_to_download.copy()
-        self._download_current_index = 0
-        self._total_to_download = len(songs_to_download)
-        self._downloaded_files.clear()
-
-        self.bar_overall.setMaximum(self._total_to_download)
+        self.bar_overall.setMaximum(len(songs_to_download))
         self.bar_overall.setValue(0)
         self.bar_download.setValue(0)
+        self.label_stats.setText(f"准备下载 {len(songs_to_download)} 首...")
 
-        self._start_next_download()
+        self._start_downloads()
+
+    def _start_downloads(self):
+        """启动并发下载，直至达到并发数或队列为空"""
+        while len(self.active_downloads) < self.download_concurrency and self.download_queue:
+            song_info = self.download_queue.pop(0)
+            thread = self._create_download_thread(song_info)
+            self.active_downloads.append(thread)
+            thread.start()
+
+    def _create_download_thread(self, song_info):
+        """创建单个下载线程，携带转换设置"""
+        thread = DownloadThread(
+            song_info,
+            self._get_request_kwargs_for_source,
+            self.settings['save_dir'],
+            self._get_filename_template(),
+            self.settings['download_lyric'],
+            self.settings['download_cover'],
+            convert_format=self.settings.get('convert_format', ''),
+            convert_bitrate=self.settings.get('convert_bitrate', '')
+        )
+        thread.progress.connect(self._on_single_progress)
+        thread.finished.connect(self._on_single_download_finished)
+        thread.error.connect(self._on_single_download_error)
+        return thread
+
+    def _on_single_progress(self, percent):
+        """单个下载进度（可更新单曲进度条）"""
+        self.bar_download.setValue(percent)
+
+    def _update_eta(self):
+        """更新 ETA 显示"""
+        if self.download_start_time is None:
+            return
+        elapsed = time.time() - self.download_start_time
+        if elapsed < 1:
+            return
+        total = self.bar_overall.maximum()
+        done = self.bar_overall.value()
+        if done == 0 or total == 0:
+            return
+        progress = done / total
+        eta_seconds = (elapsed / progress) - elapsed
+        eta_str = self._format_time(int(eta_seconds)) if eta_seconds > 0 else "即将完成"
+        self.label_stats.setText(f"已完成 {done}/{total}  剩余: {eta_str}")
 
     def cancel_all_downloads(self):
         if self.download_thread and self.download_thread.isRunning():
@@ -1376,6 +1708,16 @@ class MusicdlGUI(QWidget):
             return
 
         song_info = self._download_queue[self._download_current_index]
+        # 在下载前再次刷新（以防长时间停留）
+        refreshed = self.refresh_song_url(song_info)
+        if not refreshed:
+            self._download_current_index += 1
+            self.bar_overall.setValue(self._download_current_index)
+            self.label_stats.setText(f"⚠️ 跳过失效歌曲: {song_info.get('song_name')}")
+            QTimer.singleShot(100, self._start_next_download)
+            return
+        song_info = refreshed
+
         self.bar_download.setValue(0)
         self.label_stats.setText(
             f'⏳ 下载中 ({self._download_current_index+1}/{self._total_to_download}) ...'
@@ -1395,28 +1737,32 @@ class MusicdlGUI(QWidget):
         self.download_thread.start()
 
     def _on_single_download_finished(self, song_name, singers, file_path):
-        self._download_current_index += 1
-        self.bar_overall.setValue(self._download_current_index)
-        self.label_stats.setText(
-            f'✅ 已完成 {self._download_current_index}/{self._total_to_download}: {song_name} - {singers}'
-        )
-        logger.info(f"下载成功: {song_name} - {singers} -> {file_path}")
-
-        self._downloaded_files.append(file_path)
-        base = os.path.splitext(file_path)[0]
-        for pattern in [base + '.lrc'] + glob.glob(base + '_cover.*'):
-            if os.path.exists(pattern):
-                self._downloaded_files.append(pattern)
-
-        self._start_next_download()
+        self.download_completed += 1
+        self.bar_overall.setValue(self.download_completed)
+        # 移除该线程
+        thread = self.sender()
+        if thread in self.active_downloads:
+            self.active_downloads.remove(thread)
+        self._update_eta()
+        self._start_downloads()
+        # 检查是否全部完成
+        if self.download_completed >= len(self.download_queue) + len(self.active_downloads):
+            self._on_all_downloads_finished()
 
     def _on_single_download_error(self, error_msg):
         if self._download_cancelled:
             return
         QMessageBox.critical(self, '下载错误', f'下载失败：{error_msg}')
-        self._download_current_index += 1
-        self.bar_overall.setValue(self._download_current_index)
-        self._start_next_download()
+        # 同样完成计数，但标记为错误
+        self.download_completed += 1
+        self.bar_overall.setValue(self.download_completed)
+        thread = self.sender()
+        if thread in self.active_downloads:
+            self.active_downloads.remove(thread)
+        self._start_downloads()
+        # 检查是否全部完成
+        if self.download_completed >= len(self.download_queue) + len(self.active_downloads):
+            self._on_all_downloads_finished()
 
     def _on_all_downloads_finished(self, cancelled=False):
         self.is_downloading = False
@@ -1441,10 +1787,14 @@ class MusicdlGUI(QWidget):
             except Exception:
                 pass
             self.download_thread = None
-        self._download_queue = []
+        self.download_queue = []
+        self.active_downloads.clear()
+        self.download_completed = 0
+        self.download_start_time = None
         self._downloaded_files.clear()
         self._adjusting = False
 
+    # ---------- 窗口控制 ----------
     def resizeEvent(self, event):
         super().resizeEvent(event)
 
@@ -1510,6 +1860,12 @@ class MusicdlGUI(QWidget):
             self.btn_maximize.setText("❐")
 
     def closeEvent(self, event):
+        self._url_cache.clear()
+        # 保存当前设置（音量、播放模式等）
+        self.settings['volume'] = self.slider_volume.value()
+        self.settings['play_mode'] = self.combo_playmode.currentIndex()
+        save_settings(self.settings)
+
         if hasattr(self, '_vis_download_thread') and self._vis_download_thread is not None:
             if self._vis_download_thread.isRunning():
                 self._vis_download_thread.stop()
@@ -1545,6 +1901,7 @@ class MusicdlGUI(QWidget):
                 self._requests_session.close()
         except Exception:
             pass
+        self.cover_pool.waitForDone(3000)
         event.accept()
 
     def _show_warning(self, title: str, text: str):
@@ -1555,6 +1912,7 @@ class MusicdlGUI(QWidget):
         msg.setStandardButtons(QMessageBox.Ok)
         msg.exec_()
 
+    # ---------- 可视化 ----------
     def show_visualization(self):
         if self.current_play_index < 0 or not self.playlist:
             if hasattr(self, 'vis_window') and self.vis_window is not None:
@@ -1569,6 +1927,8 @@ class MusicdlGUI(QWidget):
             return
 
         song_info = self.playlist[self.current_play_index]
+        # 移除 refresh_song_url 调用，因为若文件已存在则无需刷新
+        # 直接检查本地文件是否存在
         base_name = self._get_base_name_for_song(song_info, "{歌手}-{歌曲名}")
         ext = song_info.get('ext', 'mp3')
         save_dir = self.settings['save_dir']
@@ -1585,6 +1945,7 @@ class MusicdlGUI(QWidget):
         if audio_file and os.path.exists(audio_file):
             self._open_visualization(audio_file, song_info)
         else:
+            # 文件不存在，需要下载，下载前会调用 refresh_song_url
             reply = QMessageBox.question(self, "文件未下载",
                                          "当前歌曲尚未下载到本地，是否立即下载？",
                                          QMessageBox.Yes | QMessageBox.No)
@@ -1628,6 +1989,13 @@ class MusicdlGUI(QWidget):
         fmt = "{歌手}-{歌曲名}"
         dl_lyric = True
         dl_cover = True
+
+        # 刷新链接
+        refreshed = self.refresh_song_url(song_info)
+        if not refreshed:
+            QMessageBox.warning(self, "链接失效", "无法获取有效链接，请稍后重试。")
+            return
+        song_info = refreshed
 
         if hasattr(self, '_vis_download_thread') and self._vis_download_thread is not None:
             if self._vis_download_thread.isRunning():
@@ -1681,6 +2049,7 @@ class MusicdlGUI(QWidget):
         QMessageBox.critical(self, "下载失败", f"下载可视化所需文件失败：{error_msg}")
         self._vis_download_thread = None
 
+    # ---------- 封面加载 ----------
     def _on_cover_loaded(self, payload):
         try:
             if isinstance(payload, tuple) and len(payload) == 2:
@@ -1696,7 +2065,7 @@ class MusicdlGUI(QWidget):
                 return
             pixmap = QPixmap()
             if pixmap.loadFromData(img_data):
-                scaled = pixmap.scaled(120, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                scaled = pixmap.scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 self.cover_label.setPixmap(scaled)
             else:
                 self.cover_label.setText("🎵")
@@ -1709,10 +2078,11 @@ class MusicdlGUI(QWidget):
     def _fetch_cover_async(self, url: str, request_kwargs: Dict):
         self._cover_task_id += 1
         task_id = self._cover_task_id
-        self._last_cover_runnable = CoverRunnable(url, request_kwargs, task_id, session=self._requests_session)
-        self._last_cover_runnable.signals.finished.connect(self._on_cover_loaded)
-        QThreadPool.globalInstance().start(self._last_cover_runnable)
+        runnable = CoverRunnable(url, request_kwargs, task_id, session=self._requests_session)
+        runnable.signals.finished.connect(self._on_cover_loaded)
+        self.cover_pool.start(runnable)
 
+    # ---------- 播放控制 ----------
     def toggle_playback(self):
         if not self.playlist and self.player.state() == PlayerState.StoppedState:
             QMessageBox.information(self, "提示", "播放列表为空，请先选择歌曲播放。")
@@ -1740,9 +2110,6 @@ class MusicdlGUI(QWidget):
         self.cover_label.setPixmap(QPixmap())
         self._cover_task_id += 1
         self._last_cover_runnable = None
-        # 注意：不应清空歌单，只停止播放
-        # self.playlist.clear()
-        # self.current_play_index = -1
 
     def set_position(self, pos):
         self.player.setPosition(pos)
@@ -1788,6 +2155,8 @@ class MusicdlGUI(QWidget):
 
     def on_playmode_changed(self, index):
         self.play_mode = PlayMode(index)
+        self.settings['play_mode'] = index
+        save_settings(self.settings)
 
     def _on_playback_ended(self):
         if not self.playlist or self.current_play_index < 0 or self.current_play_index >= len(self.playlist):
@@ -1813,19 +2182,29 @@ class MusicdlGUI(QWidget):
                 self.current_play_index = next_idx
                 self.play_current()
 
-    # 删除 play_song_at_row，已被 add_to_playlist 替代
-
     def play_current(self):
         if not self.playlist or self.current_play_index < 0 or self.current_play_index >= len(self.playlist):
             self.stop_playback()
             return
+
         song_info = self.playlist[self.current_play_index]
+
+        # 🔥 刷新链接
+        refreshed = self.refresh_song_url(song_info)
+        if not refreshed:
+            QMessageBox.warning(self, "播放失败", "无法获取有效的播放链接，请检查网络或重新搜索。")
+            self.stop_playback()
+            return
+        song_info = refreshed
+
         url = song_info.get('download_url')
         if not url:
             QMessageBox.warning(self, "无法播放", "该歌曲没有可用的播放链接。")
             return
 
-        self.player.stop()
+        # 重置播放器
+        self.player.reset()
+
         source = song_info.get('source', '')
         req_kwargs = self._get_request_kwargs_for_source(source)
         headers = req_kwargs.get('headers') or {}
@@ -1835,6 +2214,7 @@ class MusicdlGUI(QWidget):
         name = song_info.get('song_name', '')
         self.now_playing_label.setText(f"🎵 {singer} - {name}")
 
+        # 加载歌词
         lyric_text = song_info.get('lyric') or song_info.get('lyrics', '')
         if lyric_text:
             self.current_lyrics = self.parse_lrc(lyric_text)
@@ -1842,11 +2222,12 @@ class MusicdlGUI(QWidget):
             self.current_lyrics = []
         self.current_lyric_index = -1
         self.lyric_display.clear()
-
         self.update_lyric_display(0)
 
-        self.player.play(volume=self.slider_volume.value())
+        volume = self.slider_volume.value()
+        QTimer.singleShot(200, lambda: self.player.play(volume=volume))
 
+        # 加载封面
         cover_url = get_cover_url(song_info)
         if cover_url:
             req_kwargs = self._get_request_kwargs_for_source(source)
@@ -1879,6 +2260,7 @@ class MusicdlGUI(QWidget):
         if info:
             self.add_to_playlist(info, play=True)
 
+    # ---------- 歌词解析与显示 ----------
     def parse_lrc(self, text: str) -> List[Tuple[int, str]]:
         lyrics = []
         pattern = r'\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)'
@@ -1967,6 +2349,7 @@ class MusicdlGUI(QWidget):
         self.lyric_display.clear()
         self.lyric_display.addItem("停止播放")
 
+    # ---------- 文件名工具 ----------
     def _get_filename_template(self) -> str:
         fmt = self.settings['filename_format']
         if fmt == '自定义':
