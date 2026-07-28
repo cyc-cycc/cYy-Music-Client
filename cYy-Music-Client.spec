@@ -158,8 +158,8 @@ app = BUNDLE(
     icon=ICON_PATH if os.path.exists(ICON_PATH) else None,
     bundle_identifier='com.cYy.musicdlgui',
     info_plist={
-        'CFBundleShortVersionString': '4.4.1',
-        'CFBundleVersion': '4.4.1',
+        'CFBundleShortVersionString': '4.4.2',
+        'CFBundleVersion': '4.4.2',
         'CFBundleName': 'cYy Music Client',
         'CFBundleDisplayName': 'cYy Music Client',
         'NSHighResolutionCapable': True,
