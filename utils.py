@@ -135,11 +135,13 @@ def setup_logging():
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
 
+    # 始终先定义 formatter（避免 try/except 中未定义导致 NameError）
+    file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
     file_handler = None
     try:
         file_handler = RotatingFileHandler(LOG_FILE, maxBytes=10*1024*1024, backupCount=5, encoding='utf-8')
         file_handler.setLevel(logging.ERROR if os.getenv('MUSICDL_GUI_DEBUG') is None else logging.DEBUG)
-        file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         file_handler.setFormatter(file_formatter)
         logger.addHandler(file_handler)
     except Exception as e:
@@ -159,11 +161,13 @@ def global_exception_hook(exctype, value, tb):
     error_msg = ''.join(traceback.format_exception(exctype, value, tb))
     logger.error(error_msg)
     try:
+        # 按需导入 QApplication，避免模块级依赖
+        from PyQt5.QtWidgets import QApplication
+        from PyQt5.QtCore import QTimer
         app = QApplication.instance()
         if app:
             main_widget = app.activeWindow()
             if main_widget and hasattr(main_widget, 'label_stats'):
-                from PyQt5.QtCore import QTimer
                 QTimer.singleShot(0, lambda: main_widget.label_stats.setText(
                     f'⚠️ 程序发生错误，详见日志文件: {LOG_FILE}'
                 ))
@@ -182,9 +186,12 @@ def _download_image_data(
 ) -> Tuple[Optional[bytes], Optional[str]]:
     if not url:
         return None, None
+    sess_local = False
     try:
         sess = session or requests.Session()
-        kw = request_kwargs.copy()
+        if session is None:
+            sess_local = True
+        kw = request_kwargs.copy() if request_kwargs else {}
         kw['timeout'] = kw.get('timeout', 10)
         kw['stream'] = True
         kw.pop('data', None)
@@ -197,35 +204,42 @@ def _download_image_data(
             if content_length and int(content_length) > max_size:
                 logger.warning(f"封面图片过大 ({content_length} bytes)，跳过下载")
                 return None, None
-            data = b''
+            data_arr = bytearray()
             for chunk in resp.iter_content(chunk_size=8192):
                 if not chunk:
                     continue
-                data += chunk
-                if len(data) > max_size:
+                data_arr.extend(chunk)
+                if len(data_arr) > max_size:
                     logger.warning("封面数据超过限制，截断")
                     return None, None
-            if not data:
+            if not data_arr:
                 return None, None
 
-            kind = filetype.guess(data)
+            data_bytes = bytes(data_arr)
+            kind = filetype.guess(data_bytes)
             if kind and kind.extension in ('jpg', 'jpeg', 'png', 'bmp', 'gif'):
                 ext = kind.extension
                 if ext == 'jpeg':
                     ext = 'jpg'
-                return data, ext
+                return data_bytes, ext
             else:
                 content_type = resp.headers.get('content-type', '').lower()
                 if 'png' in content_type:
-                    return data, 'png'
+                    return data_bytes, 'png'
                 elif 'jpeg' in content_type or 'jpg' in content_type:
-                    return data, 'jpg'
+                    return data_bytes, 'jpg'
                 else:
                     logger.warning(f"未知图片格式: {content_type}")
                     return None, None
     except Exception as e:
         logger.error(f"图片下载异常: {e}", exc_info=True)
         return None, None
+    finally:
+        if sess_local:
+            try:
+                sess.close()
+            except Exception:
+                pass
 
 def get_cover_url(song_info: Dict) -> Optional[str]:
     for key in ['cover_url', 'cover', 'song_cover', 'album_cover', 'pic_url', 'img_url']:
@@ -704,8 +718,14 @@ def convert_audio(input_path: str, output_format: str, bitrate: str = None) -> s
         cmd.extend(['-acodec', 'flac'])
     cmd.append(output_path)
 
+    startupinfo = None
+    if sys.platform == 'win32':
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+
     try:
-        subprocess.run(cmd, capture_output=True, check=True)
+        subprocess.run(cmd, capture_output=True, check=True, startupinfo=startupinfo)
         logger.info(f"转换成功: {output_path}")
         return output_path
     except subprocess.CalledProcessError as e:

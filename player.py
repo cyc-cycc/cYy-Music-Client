@@ -44,7 +44,15 @@ class PlayerWrapper(QObject):
         if headers:
             for k, v in headers.items():
                 if v is not None:
-                    self._current_media.add_option(f'--http-header={k}={v}')
+                    # 使用 ':' 前缀更符合 libvlc 的 add_option 语法，兼容性更好
+                    try:
+                        self._current_media.add_option(f':http-header={k}={v}')
+                    except Exception:
+                        # 保持兼容性：尝试旧的写法
+                        try:
+                            self._current_media.add_option(f'--http-header={k}={v}')
+                        except Exception:
+                            pass
         self._player.set_media(self._current_media)
         self._duration = 0
         self.durationChanged.emit(0)

@@ -121,6 +121,7 @@ class PlaylistParseThread(QThread):
         try:
             self.parse_started.emit(self.task_id)
             client = self.music_client.music_clients.get(self.source_internal)
+            temp_client = None
             if not client:
                 from musicdl import musicdl
                 temp_client = musicdl.MusicClient(music_sources=[self.source_internal])
@@ -157,6 +158,16 @@ class PlaylistParseThread(QThread):
         except Exception as e:
             logger.error(f"歌单解析线程异常: {e}", exc_info=True)
             self.parse_error.emit(self.task_id, str(e))
+        finally:
+            try:
+                if temp_client and hasattr(temp_client, 'close'):
+                    temp_client.close()
+            except Exception:
+                pass
+            try:
+                del temp_client
+            except Exception:
+                pass
 
 # ==================== 下载线程（增加格式转换） ====================
 class DownloadThread(QThread):
@@ -305,7 +316,8 @@ class DownloadThread(QThread):
                     if total:
                         percent = int(downloaded / total * 100)
                     else:
-                        percent = min(99, int(downloaded / 1024))
+                        # 当 total 不可用时使用较保守的估算（避免把字节数直接当百分比）
+                        percent = min(99, int(downloaded / (1024 * 50)))  # 每 50KB 视作 1%
                     if (now - last_emit_time) > 0.25 or percent == 100:
                         try:
                             self.progress.emit(percent)
@@ -389,3 +401,36 @@ class DownloadThread(QThread):
                 self.error.emit(f"嵌入封面失败: {str(e)}")
             except Exception:
                 pass
+# ==================== 链接刷新线程（异步） ====================
+class RefreshThread(QThread):
+    """异步刷新歌曲下载链接，返回刷新后的 song_info 列表"""
+    refresh_finished = pyqtSignal(list, object)  # (refreshed_list, user_data)
+    progress = pyqtSignal(int, int)              # (current, total) 新增
+
+    def __init__(self, song_infos: List[Dict], refresh_func, user_data=None):
+        """
+        :param song_infos: 需要刷新的歌曲信息列表（每个字典至少包含 identifier, source, singers, song_name）
+        :param refresh_func: 实际执行刷新的函数（即原有的 refresh_song_url）
+        :param user_data: 透传数据，便于回调识别场景
+        """
+        super().__init__()
+        self.song_infos = song_infos
+        self.refresh_func = refresh_func
+        self.user_data = user_data
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        total = len(self.song_infos)
+        refreshed = []
+        for idx, info in enumerate(self.song_infos):
+            if self._stop:
+                break
+            new_info = self.refresh_func(info)
+            if new_info:
+                refreshed.append(new_info)
+            # 发射进度信号
+            self.progress.emit(idx + 1, total)
+        self.refresh_finished.emit(refreshed, self.user_data)

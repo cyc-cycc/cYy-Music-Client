@@ -12,6 +12,9 @@ from PyQt5.QtWidgets import (
 )
 from constants import SOURCE_GROUPS, FILENAME_FORMATS, PLAYLIST_SOURCE_MAP, DEFAULT_SAVE_DIR
 
+# 使用 utils._download_image_data 来统一封面下载行为（大小限制与格式检测）
+from utils import _download_image_data
+
 # ==================== 封面加载器（独立类） ====================
 class CoverLoader(QThread):
     finished = pyqtSignal(bytes)
@@ -22,9 +25,9 @@ class CoverLoader(QThread):
 
     def run(self):
         try:
-            resp = requests.get(self.url, timeout=10)
-            if resp.status_code == 200:
-                self.finished.emit(resp.content)
+            data, ext = _download_image_data(self.url, {}, max_size=5 * 1024 * 1024, session=None)
+            if data:
+                self.finished.emit(data)
         except Exception:
             pass
 
