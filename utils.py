@@ -13,6 +13,7 @@ import requests
 import filetype
 
 from constants import DATA_DIR, LOG_DIR, LOG_FILE, DEFAULT_SAVE_DIR
+from constants import THEMES
 
 # ==================== 运行时路径设置 ====================
 def setup_runtime_paths():
@@ -278,353 +279,436 @@ def check_dependencies():
     }
 
 # ==================== 全局样式表 ====================
-def get_global_stylesheet():
-    return """
+def get_global_stylesheet(theme_name: str = 'light', bg_opacity: float = 0.8) -> str:
+    colors = THEMES.get(theme_name, THEMES['light'])
+    alpha = int(255 * max(0.5, min(1.0, bg_opacity)))
+    content_bg = f"rgba({colors['content_rgb']},{alpha})"
+    colors_with_alpha = colors.copy()
+    colors_with_alpha['content_bg'] = content_bg
+    template = """
     /* 基础字体和全局背景 */
-    QWidget {
+    QWidget {{
         font-family: "Microsoft YaHei", "PingFang SC", "Helvetica Neue", "Segoe UI", sans-serif;
         font-size: 12px;
-    }
-
-    /* 主窗口（通过 objectName 匹配） */
-    #musicdlGUI {
-        background-color: #F5F7FA;
+        color: {text};
+    }}
+    #musicdlGUI {{
+        background-color: {background};
         border-radius: 8px;
-    }
-
-    /* 标题栏 */
-    #titleBar {
-        background-color: #E8F0FE;
+    }}
+    #titleBar {{
+        background-color: {title_bar};
         border-radius: 8px;
-        border-bottom: 1px solid #BDC3C7;
-    }
-    #titleBar QLabel {
+        border-bottom: 1px solid {border};
+    }}
+    #titleBar QLabel {{
         background: transparent;
         font-size: 14px;
-    }
-
-    /* 标题栏按钮 */
-    #titleSearchButton, #titleSettingsButton, #titleAboutButton {
+        font-weight: bold;
+        color: {title_text};
+    }}
+    #titleSearchButton, #titleSettingsButton, #titleAboutButton {{
         background-color: transparent;
         border: none;
         border-radius: 4px;
         font-size: 16px;
-        color: #2C3E50;
-    }
-    #titleSearchButton:hover, #titleSettingsButton:hover, #titleAboutButton:hover {
-        background-color: #D5D8DC;
-    }
-    #titleMinButton, #titleMaxButton, #titleCloseButton {
+        color: {text};
+    }}
+    #titleSearchButton:hover, #titleSettingsButton:hover, #titleAboutButton:hover {{
+        background-color: {hover};
+    }}
+    #titleMinButton, #titleMaxButton, #titleCloseButton {{
         background-color: transparent;
         border: none;
         border-radius: 4px;
         font-size: 16px;
         font-weight: bold;
-        color: #2C3E50;
-    }
-    #titleMinButton:hover { background-color: #D5D8DC; }
-    #titleMaxButton:hover { background-color: #D5D8DC; }
-    #titleCloseButton:hover { background-color: #E74C3C; color: white; }
-
-    /* 内容区域 */
-    #contentWidget {
-        background-color: rgba(200, 225, 245, 240);
+        color: {text};
+    }}
+    #titleMinButton:hover {{ background-color: {hover}; }}
+    #titleMaxButton:hover {{ background-color: {hover}; }}
+    #titleCloseButton:hover {{ background-color: #E74C3C; color: white; }}
+    #contentWidget {{
+        background-color: {content_bg};
         border-radius: 8px;
-    }
-
-    /* 分组框 */
-    QGroupBox {
+    }}
+    QGroupBox {{
         font-weight: bold;
-        border: 1px solid #BDC3C7;
+        border: 1px solid {border};
         border-radius: 5px;
         margin-top: 10px;
         padding-top: 10px;
-    }
-    QGroupBox::title {
+        color: {text};
+    }}
+    QGroupBox::title {{
         subcontrol-origin: margin;
         left: 10px;
         padding: 0 5px;
-        color: #2C3E50;
-    }
-    QGroupBox#playGroup {
-        background-color: #E8F0FE;
-        border-color: #4A90D9;
-    }
-
-    /* 通用标签 */
-    QLabel { color: #2C3E50; }
-
-    /* 复选框 */
-    QCheckBox { color: #2C3E50; spacing: 5px; }
-    QCheckBox::indicator { width: 16px; height: 16px; }
-
-    /* 输入框、数字框、下拉框 */
-    QLineEdit, QSpinBox, QComboBox {
-        background-color: white;
-        border: 1px solid #BDC3C7;
+        color: {text};
+    }}
+    QGroupBox#playGroup {{
+        background-color: {title_bar};
+        border-color: {primary};
+    }}
+    QLabel {{ color: {text}; }}
+    QCheckBox {{ color: {text}; spacing: 5px; }}
+    QCheckBox::indicator {{ width: 16px; height: 16px; }}
+    QLineEdit, QSpinBox, QComboBox {{
+        background-color: {surface};
+        border: 1px solid {border};
         border-radius: 5px;
         padding: 5px;
-        color: #2C3E50;
-    }
-    QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
-        border: 1px solid #4A90D9;
-    }
-
-    /* 按钮基础 */
-    QPushButton {
-        background-color: #E8EDF2;
-        color: #2C3E50;
-        border: 1px solid #BDC3C7;
+        color: {text};
+    }}
+    QLineEdit:focus, QSpinBox:focus, QComboBox:focus {{
+        border: 1px solid {primary};
+    }}
+    QPushButton {{
+        background-color: {hover};
+        color: {text};
+        border: 1px solid {border};
         border-radius: 4px;
         padding: 4px 10px;
-    }
-    QPushButton:hover { background-color: #D5D8DC; }
-
-    /* 特殊功能按钮（通过 objectName） */
-    QPushButton#playButton {
-        background-color: #4A90D9;
+    }}
+    QPushButton:hover {{ background-color: {border}; }}
+    QPushButton#playButton {{
+        background-color: {primary};
         color: white;
         font-weight: bold;
         border: none;
-    }
-    QPushButton#playButton:hover { background-color: #357ABD; }
-
-    QPushButton#stopButton {
+    }}
+    QPushButton#playButton:hover {{ background-color: {primary_dark}; }}
+    QPushButton#stopButton {{
         background-color: #E67E22;
         color: white;
         font-weight: bold;
         border: none;
-    }
-    QPushButton#stopButton:hover { background-color: #D35400; }
-
-    QPushButton#prevButton, QPushButton#nextButton {
-        background-color: #5DADE2;
+    }}
+    QPushButton#stopButton:hover {{ background-color: #D35400; }}
+    QPushButton#prevButton, QPushButton#nextButton {{
+        background-color: {primary_light};
         color: white;
         font-weight: bold;
         border: none;
         border-radius: 4px;
-    }
-    QPushButton#prevButton:hover, QPushButton#nextButton:hover {
-        background-color: #3498DB;
-    }
-
-    QPushButton#visualizeButton {
+    }}
+    QPushButton#prevButton:hover, QPushButton#nextButton:hover {{
+        background-color: {primary};
+    }}
+    QPushButton#visualizeButton {{
         background-color: #8E44AD;
         color: white;
         font-weight: bold;
         border: none;
         border-radius: 4px;
-    }
-    QPushButton#visualizeButton:hover { background-color: #6C3483; }
-
-    QPushButton#parsePlaylistButton {
+    }}
+    QPushButton#visualizeButton:hover {{ background-color: #6C3483; }}
+    QPushButton#parsePlaylistButton {{
         background-color: #8E44AD;
         color: white;
         font-weight: bold;
         border: none;
         border-radius: 4px;
-    }
-    QPushButton#parsePlaylistButton:hover { background-color: #6C3483; }
-
-    /* 表格（虽然未使用，但保留兼容） */
-    QTableWidget#resultTable {
-        background-color: white;
-        alternate-background-color: #ECF0F1;
-        border: 1px solid #BDC3C7;
+    }}
+    QPushButton#parsePlaylistButton:hover {{ background-color: #6C3483; }}
+    QTableWidget#resultTable {{
+        background-color: {surface};
+        alternate-background-color: {hover};
+        border: 1px solid {border};
         border-radius: 5px;
-        gridline-color: #D5D8DC;
-    }
-    QTableWidget::item { padding: 4px; color: #2C3E50; }
-    QTableWidget::item:selected { background-color: #4A90D9; color: white; }
-    QHeaderView::section {
-        background-color: #4A90D9;
+        gridline-color: {border};
+    }}
+    QTableWidget::item {{ padding: 4px; color: {text}; }}
+    QTableWidget::item:selected {{ background-color: {primary}; color: white; }}
+    QHeaderView::section {{
+        background-color: {primary};
         color: white;
         padding: 5px;
         border: none;
-    }
-
-    /* 进度条 */
-    QProgressBar {
-        border: 1px solid #BDC3C7;
+    }}
+    QProgressBar {{
+        border: 1px solid {border};
         border-radius: 5px;
-        background-color: white;
+        background-color: {surface};
         text-align: center;
-        color: #2C3E50;
+        color: {text};
         font-weight: bold;
-    }
-    QProgressBar::chunk {
-        background-color: #4A90D9;
+    }}
+    QProgressBar::chunk {{
+        background-color: {primary};
         border-radius: 5px;
-    }
-
-    /* 状态标签 */
-    QLabel#statsLabel {
-        color: #1E88E5;
+    }}
+    QLabel#statsLabel {{
+        color: {primary};
         font-weight: bold;
         font-size: 13px;
         background-color: rgba(74, 144, 217, 0.1);
         border-radius: 5px;
         padding: 4px;
-    }
-
-    /* 右键菜单 */
-    QMenu {
-        background-color: white;
-        border: 1px solid #BDC3C7;
+    }}
+    QMenu {{
+        background-color: {surface};
+        border: 1px solid {border};
         border-radius: 5px;
-    }
-    QMenu::item {
+    }}
+    QMenu::item {{
         padding: 6px 20px;
-        color: #2C3E50;
-    }
-    QMenu::item:selected {
-        background-color: #4A90D9;
+        color: {text};
+    }}
+    QMenu::item:selected {{
+        background-color: {primary};
         color: white;
-    }
-
-    /* 滑块 */
-    QSlider::groove:horizontal {
+    }}
+    QSlider::groove:horizontal {{
         height: 6px;
-        background: #D5D8DC;
+        background: {border};
         border-radius: 3px;
-    }
-    QSlider::handle:horizontal {
-        background: #4A90D9;
+    }}
+    QSlider::handle:horizontal {{
+        background: {primary};
         width: 14px;
         height: 14px;
         margin: -4px 0;
         border-radius: 7px;
-    }
-    QSlider::sub-page:horizontal {
-        background: #4A90D9;
+    }}
+    QSlider::sub-page:horizontal {{
+        background: {primary};
         border-radius: 3px;
-    }
-
-    /* 列表控件（结果列表） */
-    QListWidget {
+    }}
+    QListWidget {{
         background-color: transparent;
         border: none;
         outline: none;
-    }
-    QListWidget::item {
+    }}
+    QListWidget::item {{
         padding: 2px 5px;
-    }
-    /* 卡片式列表的选中状态由卡片自己控制，这里不干扰 */
-    QListWidget::item:selected {
+        color: {text};
+    }}
+    QListWidget::item:selected {{
         background: transparent;
-    }
-
-    /* ==================== 新增补充样式 ==================== */
-
-    /* 标签页 */
-    QTabWidget::pane {
-        border: 1px solid #BDC3C7;
+    }}
+    QTabWidget::pane {{
+        border: 1px solid {border};
         border-radius: 5px;
-        background: white;
-    }
-    QTabBar::tab {
-        background: #E8EDF2;
-        color: #2C3E50;
+        background: {surface};
+    }}
+    QTabBar::tab {{
+        background: {hover};
+        color: {text};
         padding: 8px 16px;
         margin-right: 2px;
         border-top-left-radius: 4px;
         border-top-right-radius: 4px;
-        border: 1px solid #BDC3C7;
+        border: 1px solid {border};
         border-bottom: none;
-    }
-    QTabBar::tab:selected {
-        background: #4A90D9;
+    }}
+    QTabBar::tab:selected {{
+        background: {primary};
         color: white;
-    }
-    QTabBar::tab:hover:!selected {
-        background: #D5D8DC;
-    }
-
-    /* 对话框 */
-    QDialog {
-        background: #F5F7FA;
+    }}
+    QTabBar::tab:hover:!selected {{
+        background: {border};
+    }}
+    QDialog {{
+        background: {background};
         border-radius: 8px;
-    }
-
-    /* 数字输入框的箭头按钮 */
-    QSpinBox::up-button, QSpinBox::down-button {
-        background: #E8EDF2;
+    }}
+    QSpinBox::up-button, QSpinBox::down-button {{
+        background: {hover};
         border: none;
         border-radius: 2px;
         width: 16px;
-    }
-    QSpinBox::up-button:hover, QSpinBox::down-button:hover {
-        background: #D5D8DC;
-    }
-
-    /* 下拉框的下拉按钮 */
-    QComboBox::drop-down {
+    }}
+    QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+        background: {border};
+    }}
+    QComboBox::drop-down {{
         subcontrol-origin: padding;
         subcontrol-position: top right;
         width: 20px;
-        border-left: 1px solid #BDC3C7;
+        border-left: 1px solid {border};
         border-top-right-radius: 5px;
         border-bottom-right-radius: 5px;
-        background: #E8EDF2;
-    }
-    QComboBox::down-arrow {
+        background: {hover};
+    }}
+    QComboBox::down-arrow {{
         width: 12px;
         height: 12px;
-    }
-    QComboBox QAbstractItemView {
-        border: 1px solid #BDC3C7;
+    }}
+    QComboBox QAbstractItemView {{
+        border: 1px solid {border};
         border-radius: 5px;
-        background: white;
-        selection-background-color: #4A90D9;
+        background: {surface};
+        selection-background-color: {primary};
         selection-color: white;
-    }
-
-    /* 滚动条（垂直/水平） */
-    QScrollBar:vertical {
+    }}
+    QScrollBar:vertical {{
         background: transparent;
         width: 8px;
         margin: 0px;
-    }
-    QScrollBar::handle:vertical {
+    }}
+    QScrollBar::handle:vertical {{
         background: rgba(160, 160, 160, 180);
         border-radius: 4px;
         min-height: 20px;
-    }
-    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    }}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
         height: 0px;
         background: transparent;
-    }
-    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    }}
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
         background: transparent;
-    }
-
-    QScrollBar:horizontal {
+    }}
+    QScrollBar:horizontal {{
         background: transparent;
         height: 8px;
         margin: 0px;
-    }
-    QScrollBar::handle:horizontal {
+    }}
+    QScrollBar::handle:horizontal {{
         background: rgba(160, 160, 160, 180);
         border-radius: 4px;
         min-width: 20px;
-    }
-    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    }}
+    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
         width: 0px;
         background: transparent;
-    }
-    QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+    }}
+    QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
         background: transparent;
-    }
-
-    /* 工具提示 */
-    QToolTip {
-        background: #2C3E50;
-        color: white;
+    }}
+    QToolTip {{
+        background: {text};
+        color: {surface};
         border: none;
         border-radius: 4px;
         padding: 4px;
-    }
+    }}
+    QLabel#playlist_title, QLabel#nowPlayingLabel {{
+        color: {text};
+        font-weight: bold;
+    }}
+    /* 时长标签（进度条右侧） */
+    QLabel#label_time {{
+        color: {text};
+        background-color: transparent;
+    }}
+
+    /* 结果卡片（SongCard） */
+    #songCard {{
+        background: {surface};
+        border: 1px solid {border};
+        border-radius: 8px;
+    }}
+    #songCard:hover {{
+        border: 1px solid {primary};
+        background: {hover};
+    }}
+    #songCard[selected="true"] {{
+        border: 2px solid {primary};
+        background: {title_bar};
+    }}
+    /* 设置对话框标题栏 */
+    #settingsTitleBar {{
+        background-color: {title_bar};
+        border-radius: 8px;
+        border-bottom: 1px solid {border};
+    }}
+    #settingsContent {{
+        background-color: {background};
+        border-radius: 8px;
+    }}
+
+    /* 结果卡片内部文字 */
+    #songCard QLabel#titleLabel {{
+        color: {text};
+        font-weight: bold;
+        font-size: 16px;
+    }}
+    #songCard QLabel#subLabel {{
+        color: {text_secondary};
+        font-size: 12px;
+    }}
+    #songCard QLabel#sourceLabel {{
+        background-color: {hover};
+        color: {text};
+        padding: 2px 8px;
+        border-radius: 10px;
+        font-size: 11px;
+    }}
+    /* ===== 可视化窗口 ===== */
+    AudioVisualizer QFrame#centralWidget {{
+        background: rgba({surface_rgb}, 0.5);
+        border-radius: 8px;
+    }}
+    AudioVisualizer #titleBar {{
+        background-color: {title_bar};
+        border-bottom: 1px solid {border};
+        border-top-left-radius: 8px;
+        border-top-right-radius: 8px;
+    }}
+    AudioVisualizer #contentWidget {{
+        background: transparent;
+        border-bottom-left-radius: 8px;
+        border-bottom-right-radius: 8px;
+    }}
+    AudioVisualizer #leftWidget, AudioVisualizer #rightWidget {{
+        background: rgba({surface_rgb}, 0.8);
+        border-radius: 8px;
+    }}
+    AudioVisualizer #controlWidget {{
+        background: rgba({surface_rgb}, 0.8);
+        border-radius: 8px;
+    }}
+    AudioVisualizer QLabel#songTitle {{
+        color: {text};
+        font-weight: bold;
+        font-size: 16px;
+    }}
+    AudioVisualizer QPushButton {{
+        background: rgba({surface_rgb}, 0.8);
+        color: {text};
+        border: 1px solid {border};
+        border-radius: 4px;
+        padding: 5px 12px;
+        font-weight: bold;
+    }}
+    AudioVisualizer QPushButton:hover {{
+        background: {hover};
+        border-color: {primary};
+    }}
+    AudioVisualizer QPushButton:pressed {{
+        background: rgba({surface_rgb}, 0.5);
+    }}
+    AudioVisualizer QPushButton:disabled {{
+        color: {border};
+    }}
+    AudioVisualizer QSlider::groove:horizontal {{
+        height: 6px;
+        background: {border};
+        border-radius: 3px;
+    }}
+    AudioVisualizer QSlider::handle:horizontal {{
+        background: {primary};
+        width: 16px;
+        margin: -5px 0;
+        border-radius: 8px;
+    }}
+    AudioVisualizer QSlider::sub-page:horizontal {{
+        background: {progress_gradient};
+        border-radius: 3px;
+    }}
+    AudioVisualizer QListWidget {{
+        background: transparent;
+        border: none;
+        outline: none;
+    }}
+    AudioVisualizer QListWidget::item {{
+        padding: 2px 5px;
+        color: {text};
+        background: transparent;
+    }}
     """
+    return template.format(**colors_with_alpha)
 
 # ==================== 新增工具函数 ====================
 def build_filename(song_info: Dict, fmt: str) -> str:
@@ -651,12 +735,6 @@ def build_filename(song_info: Dict, fmt: str) -> str:
         return template
 
 def safe_stop_thread(thread, signals_to_disconnect=None, finished_callback=None):
-    """
-    安全停止 QThread，断开指定信号并等待结束。
-    :param thread: QThread 实例
-    :param signals_to_disconnect: 需要断开的信号名称列表，如 ['finished', 'source_started']
-    :param finished_callback: 线程 finished 信号的临时槽函数（用于清理）
-    """
     if thread is None:
         return
     if not thread.isRunning():

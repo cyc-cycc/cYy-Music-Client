@@ -54,8 +54,10 @@ class AudioLoadThread(QThread):
 
 class AudioVisualizer(QMainWindow):
     def __init__(self, audio_path: str = None, lyric_path: str = None,
-                 cover_path: str = None, parent=None, initial_volume: int = 60):
+                 cover_path: str = None, parent=None, initial_volume: int = 60,
+                 theme_name: str = 'light'):
         super().__init__(parent)
+        self.theme_name = theme_name
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setWindowTitle("🎵 音频可视化")
@@ -95,10 +97,24 @@ class AudioVisualizer(QMainWindow):
         self.signals.update_ui.connect(self._update_ui)
         self.timer = QTimer()
         self.timer.timeout.connect(self.signals.update_ui.emit)
-        self.timer.start(30)
+        self.timer.start(50)  # 适度降低帧率
 
         self.initial_volume = initial_volume
+
+        # 钢琴卷帘参数（背景用）
+        self.WATERFALL_HEIGHT = 60          # 时间帧数
+        self.GAP_SIZE = 1                   # 键之间的间隙宽度（像素列数）
+        self.DISPLAY_WIDTH = self.fft_bins * (self.GAP_SIZE + 1) - 1   # 显示宽度
+
+        # 新增：是否显示钢琴背景
+        self.show_piano = True
+        self._update_counter = 0
+        self._background_update_interval = 2  # 每2帧更新一次背景
+
         self._init_ui()
+
+        from utils import get_global_stylesheet
+        self.setStyleSheet(get_global_stylesheet(theme_name))
 
         self.load_thread = None
 
@@ -107,18 +123,15 @@ class AudioVisualizer(QMainWindow):
 
     def _init_ui(self):
         central = QFrame()
-        central.setStyleSheet("background: rgba(255,255,255,0.5); border-radius: 8px;")
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
+        # ---------- 标题栏 ----------
         title_bar = QWidget()
         title_bar.setFixedHeight(40)
-        title_bar.setStyleSheet(
-            "background: #E8F0FE; border-bottom: 1px solid #BDC3C7;"
-            "border-top-left-radius: 8px; border-top-right-radius: 8px;"
-        )
+
         title_bar.mousePressEvent = self._title_mouse_press
         title_bar.mouseMoveEvent = self._title_mouse_move
         title_bar.mouseReleaseEvent = self._title_mouse_release
@@ -127,20 +140,30 @@ class AudioVisualizer(QMainWindow):
         title_layout.setContentsMargins(10, 0, 10, 0)
         title_layout.setSpacing(5)
 
+        # 标题
         title_label = QLabel("🎵 音频可视化")
-        title_label.setStyleSheet("color: #2C3E50; font-weight: bold; font-size: 14px;")
         title_layout.addWidget(title_label)
         title_layout.addStretch()
 
+        # 钢琴切换按钮
+        self.btn_piano = QPushButton("🎹 钢琴流")
+        self.btn_piano.setObjectName("titlePianoButton")
+        self.btn_piano.setFixedSize(80, 28)
+        self.btn_piano.setStyleSheet("""
+            QPushButton#titlePianoButton:checked {
+                background: #4A90D9;
+                color: white;
+            }
+        """)
+        self.btn_piano.setCheckable(True)
+        self.btn_piano.setChecked(True)
+        self.btn_piano.clicked.connect(self.toggle_piano)
+        title_layout.addWidget(self.btn_piano)
+
+        # 窗口控制按钮
         for symbol, slot in [("□", self._toggle_maximize), ("✕", self.close)]:
             btn = QPushButton(symbol)
-            btn.setFixedSize(32, 32)
-            btn.setStyleSheet(
-                "QPushButton { background: transparent; color: #2C3E50; border: none; border-radius: 4px; font-size: 16px; }"
-                "QPushButton:hover { background: #D5D8DC; }"
-            )
-            if symbol == "✕":
-                btn.setStyleSheet(btn.styleSheet() + "QPushButton:hover { background: #E74C3C; color: white; }")
+            btn.setFixedSize(36, 32)
             btn.clicked.connect(slot)
             title_layout.addWidget(btn)
             if symbol == "□":
@@ -148,14 +171,13 @@ class AudioVisualizer(QMainWindow):
 
         main_layout.addWidget(title_bar)
 
+        # 内容区域
         self.content_widget = QWidget()
-        self.content_widget.setStyleSheet(
-            "background: transparent; border-bottom-left-radius: 8px; border-bottom-right-radius: 8px;"
-        )
         content_layout = QVBoxLayout(self.content_widget)
         content_layout.setContentsMargins(10, 10, 10, 10)
         content_layout.setSpacing(10)
 
+        # 封面背景（底层）
         self.bg_label = QLabel(self.content_widget)
         self.bg_label.setStyleSheet("background: transparent; border-radius: 8px;")
         self.bg_label.setScaledContents(True)
@@ -163,11 +185,39 @@ class AudioVisualizer(QMainWindow):
         self.bg_label.hide()
         self.bg_label.setGeometry(self.content_widget.rect())
 
+        # 钢琴卷帘背景（中间层）
+        self.waterfall_fig = Figure(figsize=(8, 6), dpi=100, facecolor='none')
+        self.waterfall_ax = self.waterfall_fig.add_subplot(111)
+        self.waterfall_ax.set_facecolor('none')
+        self.waterfall_ax.set_frame_on(False)
+        self.waterfall_ax.set_xticks([])
+        self.waterfall_ax.set_yticks([])
+        for spine in self.waterfall_ax.spines.values():
+            spine.set_visible(False)
+
+        self.waterfall_data = np.zeros((self.WATERFALL_HEIGHT, self.fft_bins))
+        self.waterfall_rgba = np.zeros((self.WATERFALL_HEIGHT, self.DISPLAY_WIDTH, 4), dtype=np.uint8)
+
+        self.waterfall_img = self.waterfall_ax.imshow(
+            self.waterfall_rgba,
+            aspect='auto',
+            origin='upper',
+            interpolation='nearest',
+            cmap=None
+        )
+        self.waterfall_fig.tight_layout(pad=0)
+        self.waterfall_canvas = FigureCanvas(self.waterfall_fig)
+        self.waterfall_canvas.setStyleSheet("background: transparent; border: none;")
+        self.waterfall_canvas.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.waterfall_canvas.setParent(self.content_widget)
+        self.waterfall_canvas.setGeometry(self.content_widget.rect())
+
+        # UI 控件（上层）
         splitter = QSplitter(Qt.Horizontal)
         content_layout.addWidget(splitter, 1)
 
+        # 左侧：歌词 + 柱状图
         left_widget = QWidget()
-        left_widget.setStyleSheet("background: rgba(255,255,255,0.8); border-radius: 8px;")
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(5, 5, 5, 5)
         left_layout.setSpacing(5)
@@ -175,20 +225,14 @@ class AudioVisualizer(QMainWindow):
         self.song_title_label = QLabel("未选择歌曲")
         self.song_title_label.setAlignment(Qt.AlignCenter)
         self.song_title_label.setFixedHeight(35)
-        self.song_title_label.setStyleSheet(
-            "background: transparent; color: #2C3E50; font-weight: bold; font-size: 16px; padding: 5px;"
-        )
+
         left_layout.addWidget(self.song_title_label)
 
         self.lyric_list = QListWidget()
         self.lyric_list.setSelectionMode(QListWidget.NoSelection)
         self.lyric_list.setWordWrap(True)
-        self.lyric_list.setFont(QFont("Microsoft YaHei", 11))
-        self.lyric_list.setStyleSheet(
-            "QListWidget { background: transparent; color: #2C3E50; border: none; }"
-            "QListWidget::item { padding: 2px 5px; }"
-        )
         left_layout.addWidget(self.lyric_list, 1)
+        self.default_lyric_font = QFont(self.lyric_list.font())
 
         self.bar_fig = Figure(figsize=(6, 3), dpi=100, facecolor='none')
         self.bar_ax = self.bar_fig.add_subplot(111)
@@ -204,10 +248,11 @@ class AudioVisualizer(QMainWindow):
         self.bar_canvas = FigureCanvas(self.bar_fig)
         self.bar_canvas.setStyleSheet("background: transparent; border: none;")
         left_layout.addWidget(self.bar_canvas, 1)
+
         splitter.addWidget(left_widget)
 
+        # 右侧：环形图
         right_widget = QWidget()
-        right_widget.setStyleSheet("background: rgba(255,255,255,0.8); border-radius: 8px;")
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(5, 5, 5, 5)
         right_layout.setSpacing(5)
@@ -231,12 +276,13 @@ class AudioVisualizer(QMainWindow):
         self.ring_fig.tight_layout(pad=0)
         self.ring_canvas = FigureCanvas(self.ring_fig)
         self.ring_canvas.setStyleSheet("background: transparent; border: none;")
-        right_layout.addWidget(self.ring_canvas)
-        splitter.addWidget(right_widget)
-        splitter.setSizes([550, 350])
+        right_layout.addWidget(self.ring_canvas, 1)
 
+        splitter.addWidget(right_widget)
+        splitter.setSizes([550, 400])
+
+        # 底部控制栏
         control = QWidget()
-        control.setStyleSheet("background: rgba(255,255,255,0.8); border-radius: 8px; padding: 5px;")
         control_layout = QHBoxLayout(control)
         control_layout.setContentsMargins(10, 5, 10, 5)
         control_layout.setSpacing(10)
@@ -262,7 +308,6 @@ class AudioVisualizer(QMainWindow):
         control_layout.addWidget(self.progress_slider, 1)
 
         self.time_label = QLabel("00:00 / 00:00")
-        self.time_label.setStyleSheet("color: #2C3E50; font-size: 13px;")
         control_layout.addWidget(self.time_label)
 
         control_layout.addWidget(QLabel("🔊"))
@@ -285,13 +330,61 @@ class AudioVisualizer(QMainWindow):
         self.smooth_bar_vals = np.zeros(self.fft_bins)
         self.smooth_ring_vals = np.zeros(self.ring_bins)
 
+        central.setObjectName("centralWidget")
+        title_bar.setObjectName("titleBar")
+        self.content_widget.setObjectName("contentWidget")
+        left_widget.setObjectName("leftWidget")
+        right_widget.setObjectName("rightWidget")
+        control.setObjectName("controlWidget")
+        self.song_title_label.setObjectName("songTitle")
+
+    # ---------- 钢琴切换方法 ----------
+    def toggle_piano(self, checked):
+        self.show_piano = checked
+        self.waterfall_canvas.setVisible(checked)
+        self.btn_piano.setText("🎹 钢琴流" if checked else "🎹 隐藏")
+        if checked:
+            # 重新显示时，立即刷新一次
+            self._update_background_forced()
+
+    def _update_background_forced(self):
+        """强制立即更新一次背景（用于重新显示时）"""
+        if not self.show_piano or self.norm_stft is None:
+            return
+        # 用当前帧数据刷新
+        with self.lock:
+            idx = self.read_index
+        if self.audio_data is None:
+            return
+        frame = int((idx / self.sample_rate) * self.frames_per_second)
+        frame = max(0, min(frame, self.frame_count - 1))
+        raw = self.norm_stft[:, frame] ** 2
+        self.waterfall_data = np.roll(self.waterfall_data, shift=1, axis=0)
+        self.waterfall_data[0, :] = raw
+        self.waterfall_rgba.fill(0)
+        threshold = 0.02
+        for col in range(self.fft_bins):
+            dest_col = col * (self.GAP_SIZE + 1)
+            values = self.waterfall_data[:, col]
+            mask = values > threshold
+            self.waterfall_rgba[mask, dest_col, 0] = 65
+            self.waterfall_rgba[mask, dest_col, 1] = 105
+            self.waterfall_rgba[mask, dest_col, 2] = 225
+            self.waterfall_rgba[mask, dest_col, 3] = 255
+        self.waterfall_img.set_data(self.waterfall_rgba)
+        self.waterfall_canvas.draw_idle()
+
+    # ---------- 几何更新 ----------
     def _update_bg_geometry(self):
+        rect = self.content_widget.rect()
         if hasattr(self, 'bg_label') and self.bg_label.isVisible():
-            self.bg_label.setGeometry(self.content_widget.rect())
+            self.bg_label.setGeometry(rect)
             self.bg_label.setMask(self._round_mask())
+        if hasattr(self, 'waterfall_canvas'):
+            self.waterfall_canvas.setGeometry(rect)
 
     def _round_mask(self):
-        rect = self.bg_label.rect()
+        rect = self.content_widget.rect()
         if rect.width() <= 0 or rect.height() <= 0:
             return QRegion(rect, QRegion.Rectangle)
         path = QPainterPath()
@@ -303,12 +396,6 @@ class AudioVisualizer(QMainWindow):
         btn = QPushButton(text)
         btn.setFixedHeight(32)
         btn.clicked.connect(slot)
-        btn.setStyleSheet(
-            "QPushButton { background: rgba(255,255,255,0.8); color: #2C3E50; border: 1px solid #BDC3C7; border-radius: 4px; padding: 5px 12px; font-weight: bold; }"
-            "QPushButton:hover { background: #E8F0FE; border-color: #4A90D9; }"
-            "QPushButton:pressed { background: rgba(255,255,255,0.5); }"
-            "QPushButton:disabled { color: #BDC3C7; border-color: #D5D8DC; }"
-        )
         return btn
 
     def _title_mouse_press(self, e):
@@ -532,6 +619,7 @@ class AudioVisualizer(QMainWindow):
                 old.setForeground(QColor(44, 62, 80))
                 f = old.font()
                 f.setBold(False)
+                f.setPointSize(10)
                 old.setFont(f)
 
         if new_idx != -1 and new_idx < self.lyric_list.count():
@@ -541,27 +629,31 @@ class AudioVisualizer(QMainWindow):
                 new.setForeground(QColor(0, 0, 0))
                 f = new.font()
                 f.setBold(True)
+                f.setPointSize(14)
                 new.setFont(f)
-                self.lyric_list.scrollToItem(new, QListWidget.PositionAtCenter)
+
+                QTimer.singleShot(10, lambda: self.lyric_list.scrollToItem(
+                    new, QAbstractItemView.PositionAtCenter
+                ))
 
         self.current_lyric_index = new_idx
 
     def _update_spectrum(self, idx):
+        if self.paused:
+            return
+
         if self.norm_stft is None or self.frame_count == 0:
             return
 
         frame = int((idx / self.sample_rate) * self.frames_per_second)
         frame = max(0, min(frame, self.frame_count - 1))
-        raw = self.norm_stft[:, frame]
+        raw_linear = self.norm_stft[:, frame]          # 原始数据 (0~1)
+        raw_enhanced = raw_linear ** 2                 # 平方增强（仅用于瀑布流）
 
+        # ===== 柱状图（使用 raw_linear） =====
         alpha = self.smooth_alpha
-        self.smooth_bar_vals = alpha * raw + (1 - alpha) * self.smooth_bar_vals
+        self.smooth_bar_vals = alpha * raw_linear + (1 - alpha) * self.smooth_bar_vals
         smoothed_bar = self.smooth_bar_vals
-
-        ring_idx = np.linspace(0, self.fft_bins - 1, self.ring_bins, dtype=int)
-        raw_ring = raw[ring_idx]
-        self.smooth_ring_vals = alpha * raw_ring + (1 - alpha) * self.smooth_ring_vals
-        smoothed_ring = self.smooth_ring_vals
 
         cmap = plt.cm.viridis
         norm = Normalize(vmin=0, vmax=1)
@@ -571,6 +663,12 @@ class AudioVisualizer(QMainWindow):
             rect.set_color(color)
         self.bar_ax.set_ylim(0, self.y_max)
         self.bar_canvas.draw_idle()
+
+        # ===== 环形图（使用 raw_linear） =====
+        ring_idx = np.linspace(0, self.fft_bins - 1, self.ring_bins, dtype=int)
+        raw_ring = raw_linear[ring_idx]
+        self.smooth_ring_vals = alpha * raw_ring + (1 - alpha) * self.smooth_ring_vals
+        smoothed_ring = self.smooth_ring_vals
 
         ring_colors = cmap(norm(smoothed_ring))
         radii = 0.2 + 0.8 * smoothed_ring
@@ -583,6 +681,27 @@ class AudioVisualizer(QMainWindow):
             self.ring_dots[i].set_color(color)
         self.ring_ax.set_ylim(0, self.y_max)
         self.ring_canvas.draw_idle()
+
+        # ===== 瀑布流背景（使用 raw_enhanced，仅在显示时更新） =====
+        if self.show_piano:
+            self._update_counter += 1
+            if self._update_counter % self._background_update_interval == 0:
+                self.waterfall_data = np.roll(self.waterfall_data, shift=1, axis=0)
+                self.waterfall_data[0, :] = raw_enhanced
+
+                self.waterfall_rgba.fill(0)
+                threshold = 0.02
+                for col in range(self.fft_bins):
+                    dest_col = col * (self.GAP_SIZE + 1)
+                    values = self.waterfall_data[:, col]
+                    mask = values > threshold
+                    self.waterfall_rgba[mask, dest_col, 0] = 65
+                    self.waterfall_rgba[mask, dest_col, 1] = 105
+                    self.waterfall_rgba[mask, dest_col, 2] = 225
+                    self.waterfall_rgba[mask, dest_col, 3] = 255
+
+                self.waterfall_img.set_data(self.waterfall_rgba)
+                self.waterfall_canvas.draw_idle()
 
     def _playback_finished(self):
         if self.stream:
@@ -637,32 +756,30 @@ class AudioVisualizer(QMainWindow):
     def _format_time(sec):
         return f"{int(sec // 60):02d}:{int(sec % 60):02d}"
 
-    # ==================== 改进 6：增强资源释放 ====================
     def closeEvent(self, e):
-        # 停止定时器
         self.timer.stop()
         try:
             self.signals.update_ui.disconnect()
         except TypeError:
             pass
 
-        # 关闭音频流
         if self.stream:
             self.stream.stop()
             self.stream.close()
 
-        # 等待加载线程
         if self.load_thread and self.load_thread.isRunning():
             self.load_thread.quit()
             self.load_thread.wait()
 
-        # 清理 matplotlib 资源
         if hasattr(self, 'bar_canvas'):
             self.bar_canvas.figure.clear()
             self.bar_canvas.deleteLater()
         if hasattr(self, 'ring_canvas'):
             self.ring_canvas.figure.clear()
             self.ring_canvas.deleteLater()
+        if hasattr(self, 'waterfall_canvas'):
+            self.waterfall_canvas.figure.clear()
+            self.waterfall_canvas.deleteLater()
         plt.close('all')
 
         super().closeEvent(e)

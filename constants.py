@@ -69,4 +69,44 @@ class PlayMode(IntEnum):
     SingleStop = 1
     ListRepeat = 2
     ListStop = 3
-
+# ==================== 主题定义 ====================
+THEMES = {
+    'light': {
+        'display_name': '亮色',
+        'primary': '#4A90D9',
+        'primary_light': '#5DADE2',
+        'primary_dark': '#357ABD',
+        'background': '#F5F7FA',
+        'content_rgb': '200,225,245',   # 新增：半透明内容背景
+        'surface': '#FFFFFF',
+        'text': '#2C3E50',
+        'title_text': '#2C3E50',                    # 新增：标题栏文字颜色
+        'text_secondary': '#5D6D7E',
+        'border': '#BDC3C7',
+        'title_bar': '#E8F0FE',
+        'hover': '#D5D8DC',
+        'selected': '#4A90D9',
+        'shadow': 'rgba(0,0,0,30)',
+        'progress_gradient': 'qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4A90D9, stop:1 #7B2FFC)',
+        'surface_rgb': '255,255,255',
+    },
+    'dark': {
+        'display_name': '暗色',
+        'primary': '#4A90D9',
+        'primary_light': '#5DADE2',
+        'primary_dark': '#357ABD',
+        'background': '#2C3E50',
+        'content_rgb': '44,62,80',      # 新增：半透明暗色背景
+        'surface': '#34495E',
+        'text': '#ECF0F1',
+        'title_text': '#ECF0F1',                    # 新增：标题栏文字颜色
+        'text_secondary': '#BDC3C7',
+        'border': '#5D6D7E',
+        'title_bar': '#34495E',
+        'hover': '#5D6D7E',
+        'selected': '#4A90D9',
+        'shadow': 'rgba(255,255,255,30)',
+        'progress_gradient': 'qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4A90D9, stop:1 #7B2FFC)',
+        'surface_rgb': '52,73,94',
+    },
+}

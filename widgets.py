@@ -12,6 +12,8 @@ from PyQt5.QtWidgets import (
 )
 from constants import SOURCE_GROUPS, FILENAME_FORMATS, PLAYLIST_SOURCE_MAP, DEFAULT_SAVE_DIR
 
+from constants import THEMES
+
 # 使用 utils._download_image_data 来统一封面下载行为（大小限制与格式检测）
 from utils import _download_image_data
 
@@ -38,7 +40,7 @@ class SongCard(QFrame):
         self.song_info = song_info
         self.source_display = source_display
         self.setFrameStyle(QFrame.NoFrame)
-        self.setObjectName("songCard")
+        self.setObjectName("songCard")   # 新增
         self.setFixedHeight(100)
         self._init_ui()
         self._load_cover()
@@ -50,7 +52,6 @@ class SongCard(QFrame):
 
         self.cover_label = QLabel()
         self.cover_label.setFixedSize(80, 80)
-        self.cover_label.setStyleSheet("border-radius: 6px; background-color: #E8EDF2;")
         self.cover_label.setAlignment(Qt.AlignCenter)
         self.cover_label.setText("🎵")
         self.cover_label.setScaledContents(True)
@@ -62,12 +63,12 @@ class SongCard(QFrame):
         info_layout.setSpacing(2)
 
         self.name_label = QLabel(self.song_info.get('song_name', '未知歌曲'))
+        self.name_label.setObjectName("titleLabel")
         self.name_label.setFont(QFont("Microsoft YaHei", 16, QFont.Bold))
-        self.name_label.setStyleSheet("color: #2C3E50;")
         info_layout.addWidget(self.name_label)
 
         self.singer_label = QLabel(self.song_info.get('singers', '未知歌手'))
-        self.singer_label.setStyleSheet("color: #5D6D7E; font-size: 12px;")
+        self.name_label.setObjectName("titleLabel")
         info_layout.addWidget(self.singer_label)
 
         album = self.song_info.get('album', '')
@@ -81,7 +82,7 @@ class SongCard(QFrame):
             detail_text += f"  •  {file_size}" if detail_text else file_size
 
         self.detail_label = QLabel(detail_text)
-        self.detail_label.setStyleSheet("color: #7F8C8D; font-size: 14px;")
+        self.detail_label.setObjectName("subLabel")
         info_layout.addWidget(self.detail_label)
 
         source = self.source_display or self.song_info.get('source', '')
@@ -95,19 +96,6 @@ class SongCard(QFrame):
 
         layout.addWidget(info_widget, 1)
 
-        self.setStyleSheet("""
-            #songCard {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                            stop:0 #FFFFFF, stop:1 #F4F6F9);
-                border: 1px solid #DDE1E6;
-                border-radius: 8px;
-            }
-            #songCard:hover {
-                border: 1px solid #4A90D9;
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                            stop:0 #F0F7FF, stop:1 #E1EEFA);
-            }
-        """)
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(10)
         shadow.setColor(QColor(0, 0, 0, 30))
@@ -129,24 +117,9 @@ class SongCard(QFrame):
             self.cover_label.setText("")
 
     def set_selected(self, selected):
-        if selected:
-            self.setStyleSheet(self.styleSheet() + """
-                #songCard { border: 2px solid #4A90D9; background: #E8F0FE; }
-            """)
-        else:
-            self.setStyleSheet("""
-                #songCard {
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                                stop:0 #FFFFFF, stop:1 #F4F6F9);
-                    border: 1px solid #DDE1E6;
-                    border-radius: 8px;
-                }
-                #songCard:hover {
-                    border: 1px solid #4A90D9;
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                                stop:0 #F0F7FF, stop:1 #E1EEFA);
-                }
-            """)
+        self.setProperty("selected", selected)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
 # ==================== 可点击滑动条 ====================
 class ClickableSlider(QSlider):
@@ -280,13 +253,7 @@ class SettingsDialog(QDialog):
         title_bar = QWidget()
         title_bar.setObjectName("settingsTitleBar")
         title_bar.setFixedHeight(40)
-        title_bar.setStyleSheet("""
-            #settingsTitleBar {
-                background: #E8F0FE;
-                border-radius: 8px;
-                border-bottom: 1px solid #BDC3C7;
-            }
-        """)
+
         title_bar.mousePressEvent = self._title_mouse_press
         title_bar.mouseMoveEvent = self._title_mouse_move
         title_bar.mouseReleaseEvent = self._title_mouse_release
@@ -296,11 +263,9 @@ class SettingsDialog(QDialog):
         title_layout.setSpacing(5)
 
         icon_label = QLabel("⚙️")
-        icon_label.setStyleSheet("font-size: 18px; background: transparent;")
         title_layout.addWidget(icon_label)
 
         title_label = QLabel("设置")
-        title_label.setStyleSheet("color: #2C3E50; font-weight: bold; font-size: 14px; background: transparent;")
         title_layout.addWidget(title_label)
 
         title_layout.addStretch()
@@ -316,12 +281,6 @@ class SettingsDialog(QDialog):
         # ---------- 内容区域 ----------
         content_widget = QWidget()
         content_widget.setObjectName("settingsContent")
-        content_widget.setStyleSheet("""
-            #settingsContent {
-                background: #F5F7FA;
-                border-radius: 8px;
-            }
-        """)
         content_layout = QVBoxLayout(content_widget)
         content_layout.setContentsMargins(15, 15, 15, 15)
         content_layout.setSpacing(10)
@@ -375,6 +334,33 @@ class SettingsDialog(QDialog):
 
         source_layout.addLayout(form_layout)
         tabs.addTab(source_tab, "搜索源")
+        
+        # 主题选择标签页
+        theme_tab = QWidget()
+        theme_layout = QFormLayout(theme_tab)
+        theme_layout.setSpacing(10)
+        
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems([THEMES['light']['display_name'], THEMES['dark']['display_name']])
+        self.theme_combo.setCurrentIndex(0)
+        theme_layout.addRow("颜色主题:", self.theme_combo)
+
+        opacity_layout = QHBoxLayout()
+        opacity_layout.addWidget(QLabel("窗口透明度:"))
+        self.opacity_slider = QSlider(Qt.Horizontal)
+        self.opacity_slider.setRange(50, 100)          # 对应 0.50 ~ 1.00
+        self.opacity_slider.setValue(80)
+        self.opacity_slider.setFixedWidth(150)
+        self.opacity_label = QLabel("80%")
+        self.opacity_slider.valueChanged.connect(
+            lambda v: self.opacity_label.setText(f"{v}%")
+        )
+        opacity_layout.addWidget(self.opacity_slider)
+        opacity_layout.addWidget(self.opacity_label)
+        opacity_layout.addStretch()
+        theme_layout.addRow(opacity_layout)
+        
+        tabs.addTab(theme_tab, "主题设置")
 
         # 下载设置标签页
         download_tab = QWidget()
@@ -492,6 +478,10 @@ class SettingsDialog(QDialog):
 
     def get_settings(self):
         selected_sources = [cb.text() for cb in self.source_checkboxes if cb.isChecked()]
+        # ----- 新增：获取主题 -----
+        theme_idx = self.theme_combo.currentIndex()
+        theme_key = ['light', 'dark'][theme_idx] if theme_idx < 2 else 'light'
+        # -------------------------
         return {
             'sources': selected_sources,
             'limit': self.spin_limit.value(),
@@ -501,8 +491,9 @@ class SettingsDialog(QDialog):
             'custom_format': self.format_custom_edit.text().strip(),
             'download_lyric': self.check_lyric.isChecked(),
             'download_cover': self.check_cover.isChecked(),
-            # 新增转换选项
             'convert_enabled': self.convert_check.isChecked(),
             'convert_format': self.convert_combo.currentText() if self.convert_check.isChecked() else '',
             'convert_bitrate': self.bitrate_combo.currentText() if self.convert_check.isChecked() else '',
+            'theme': theme_key,
+            'background_opacity': self.opacity_slider.value() / 100.0,
         }

@@ -27,7 +27,7 @@ setup_runtime_paths()
 from constants import (
     SOURCE_GROUPS, SOURCE_INTERNAL, FILENAME_FORMATS, PLAYLIST_SOURCE_MAP,
     APP_DIR, DATA_DIR, LOG_DIR, LOG_FILE, DEFAULT_SAVE_DIR,
-    PlayerState, PlayerMediaStatus, PlayMode
+    PlayerState, PlayerMediaStatus, PlayMode, THEMES
 )
 
 # ===== 导入工具函数 =====
@@ -90,6 +90,8 @@ DEFAULT_SETTINGS = {
     'convert_enabled': False,
     'convert_format': 'mp3',
     'convert_bitrate': '320k',
+    'theme': 'light',
+    'background_opacity': 0.8,
 }
 
 def load_settings() -> dict:
@@ -179,11 +181,27 @@ class MusicdlGUI(QWidget):
 
         # ---- 刷新线程管理 ----
         self.refresh_thread = None
+        self.apply_theme(self.settings.get('theme', 'light'))
 
     def _apply_volume_from_settings(self):
         vol = self.settings.get('volume', 60)
         if hasattr(self, 'slider_volume'):
             self.slider_volume.setValue(vol)
+
+    def apply_theme(self, theme_name: str = None):
+        if theme_name is None:
+            theme_name = self.settings.get('theme', 'light')
+        bg_opacity = self.settings.get('background_opacity', 0.8)
+        from utils import get_global_stylesheet
+        stylesheet = get_global_stylesheet(theme_name, bg_opacity)
+        app = QApplication.instance()
+        if app:
+            app.setStyleSheet(stylesheet)
+            for widget in app.topLevelWidgets():
+                widget.update()
+            self.settings['theme'] = theme_name
+            save_settings(self.settings)
+            self.label_stats.setText(f"已切换主题: {THEMES.get(theme_name, {}).get('display_name', theme_name)}")
 
     def _check_deps(self):
         from utils import check_dependencies
@@ -256,7 +274,6 @@ class MusicdlGUI(QWidget):
         title_layout.addWidget(icon_label)
 
         title_label = QLabel("⚡️ cY Mic Cli")
-        title_label.setStyleSheet("color: #2C3E50; font-weight: bold; font-size: 14px;")
         title_layout.addWidget(title_label)
 
         self.search_input = QLineEdit()
@@ -402,7 +419,7 @@ class MusicdlGUI(QWidget):
         header_layout = QHBoxLayout()
         header_layout.setContentsMargins(0, 0, 0, 0)
         self.playlist_title = QLabel("🎵 播放列表 (0)")
-        self.playlist_title.setStyleSheet("font-weight: bold; font-size: 13px; color: #2C3E50;")
+        self.playlist_title.setObjectName("playlist_title")
         header_layout.addWidget(self.playlist_title)
         header_layout.addStretch()
 
@@ -448,26 +465,6 @@ class MusicdlGUI(QWidget):
 
         self.playlist_widget = QListWidget()
         self.playlist_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.playlist_widget.setStyleSheet("""
-            QListWidget {
-                background: transparent;
-                border: 1px solid rgba(0,0,0,0.1);
-                border-radius: 4px;
-                outline: none;
-            }
-            QListWidget::item {
-                padding: 4px;
-                border-bottom: 1px solid rgba(0,0,0,0.05);
-                color: #2C3E50;
-            }
-            QListWidget::item:selected {
-                background: rgba(74, 144, 217, 0.3);
-                color: #2C3E50;
-            }
-            QListWidget::item:hover {
-                background: rgba(74, 144, 217, 0.1);
-            }
-        """)
         self.playlist_widget.itemDoubleClicked.connect(self.play_playlist_item)
         self.playlist_widget.setContextMenuPolicy(Qt.CustomContextMenu)
         self.playlist_widget.customContextMenuRequested.connect(self.show_playlist_context_menu)
@@ -567,7 +564,6 @@ class MusicdlGUI(QWidget):
         self.slider_position.setTracking(True)
         self.label_time = QLabel("00:00 / 00:00")
         self.label_time.setMinimumWidth(120)
-        self.label_time.setStyleSheet("background-color: transparent; color: #2C3E50;")
         progress_layout.addWidget(self.slider_position, 1)
         progress_layout.addWidget(self.label_time)
         play_layout.addLayout(progress_layout)
@@ -1550,6 +1546,8 @@ class MusicdlGUI(QWidget):
 
         dlg.spin_limit.setValue(self.settings.get('limit', 10))
         dlg.check_dedup.setChecked(self.settings.get('dedup', False))
+        current_theme = self.settings.get('theme', 'light')
+        dlg.theme_combo.setCurrentIndex(0 if current_theme == 'light' else 1)
         dlg.path_edit.setText(self.settings.get('save_dir', DEFAULT_SAVE_DIR))
         dlg.format_combo.setCurrentText(self.settings.get('filename_format', '歌手-歌曲名'))
         dlg.format_custom_edit.setText(self.settings.get('custom_format', ''))
@@ -1565,6 +1563,8 @@ class MusicdlGUI(QWidget):
         dlg.convert_combo.setEnabled(dlg.convert_check.isChecked())
         dlg.bitrate_combo.setEnabled(dlg.convert_check.isChecked())
 
+        dlg.opacity_slider.setValue(int(self.settings.get('background_opacity', 0.8) * 100))
+
         parent_geo = self.geometry()
         dlg.move(
             parent_geo.x() + (parent_geo.width() - 620) // 2,
@@ -1575,6 +1575,8 @@ class MusicdlGUI(QWidget):
             new_settings = dlg.get_settings()
             self.settings.update(new_settings)
             save_settings(self.settings)
+            # 无论主题是否变化，都重新应用主题（刷新透明度）
+            self.apply_theme(self.settings.get('theme', 'light'))
             self._init_music_client()
             self._apply_volume_from_settings()
             self.label_stats.setText("设置已更新并保存")
@@ -1584,7 +1586,7 @@ class MusicdlGUI(QWidget):
         QMessageBox.about(self, "关于",
             "🎵 cYy Music Client\n"
             "基于 PyQt5 + musicdl\n"
-            "版本 4.4.2\n"
+            "版本 4.5.0\n"
             "本程序遵循 GNU 3.0 开源协议\n"
             "© 2026 cYy"
         )
@@ -2009,7 +2011,11 @@ class MusicdlGUI(QWidget):
                 except RuntimeError:
                     pass
                 self.vis_window = None
-            self.vis_window = AudioVisualizer(parent=self, initial_volume=self.slider_volume.value())
+            self.vis_window = AudioVisualizer(
+                parent=self,
+                initial_volume=self.slider_volume.value(),
+                theme_name=self.settings.get('theme', 'light')
+            )
             self.vis_window.destroyed.connect(self._on_vis_window_destroyed)
             self.vis_window.show()
             return
@@ -2061,7 +2067,8 @@ class MusicdlGUI(QWidget):
             lyric_file if os.path.exists(lyric_file) else None,
             cover_file if cover_file and os.path.exists(cover_file) else None,
             parent=self,
-            initial_volume=self.slider_volume.value()
+            initial_volume=self.slider_volume.value(),
+            theme_name=self.settings.get('theme', 'light')
         )
         self.vis_window.destroyed.connect(self._on_vis_window_destroyed)
         self.vis_window.show()
