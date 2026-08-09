@@ -291,6 +291,7 @@ class SettingsDialog(QDialog):
 
     def _create_content(self, parent_layout):
         tabs = QTabWidget()
+        tabs.setStyleSheet("QTabWidget::tab-bar { left: 5px; }")
         parent_layout.addWidget(tabs)
 
         # 搜索源标签页
@@ -400,14 +401,27 @@ class SettingsDialog(QDialog):
         download_layout.addLayout(fmt_layout)
 
         # 歌词/封面
+        # 第一行：下载歌词 + 嵌入歌词
+        lyric_row = QHBoxLayout()
         self.check_lyric = QCheckBox("下载歌词")
+        self.check_embed_lyrics = QCheckBox("嵌入歌词到音频并删除 .lrc 文件")
+        lyric_row.addWidget(self.check_lyric)
+        lyric_row.addWidget(self.check_embed_lyrics)
+        lyric_row.addStretch()
+        download_layout.addLayout(lyric_row)
+
+        # 第二行：下载封面 + 嵌入封面
+        cover_row = QHBoxLayout()
         self.check_cover = QCheckBox("下载封面")
         self.check_cover.setChecked(True)
-        download_layout.addWidget(self.check_lyric)
-        download_layout.addWidget(self.check_cover)
+        self.check_embed_cover = QCheckBox("嵌入封面到音频并删除封面图片")
+        cover_row.addWidget(self.check_cover)
+        cover_row.addWidget(self.check_embed_cover)
+        cover_row.addStretch()
+        download_layout.addLayout(cover_row)
 
         # ===== 新增：格式转换 =====
-        convert_group = QGroupBox("音频格式转换（需 FFmpeg）")
+        convert_group = QGroupBox("下载后转换格式")
         convert_layout = QVBoxLayout(convert_group)
         conv_row1 = QHBoxLayout()
         self.convert_check = QCheckBox("启用转换")
@@ -421,13 +435,15 @@ class SettingsDialog(QDialog):
         conv_row1.addWidget(self.convert_combo)
         conv_row1.addWidget(QLabel("比特率:"))
         self.bitrate_combo = QComboBox()
-        self.bitrate_combo.addItems(["128k", "192k", "256k", "320k"])
         self.bitrate_combo.setEnabled(False)
-        self.convert_check.toggled.connect(lambda checked: self.bitrate_combo.setEnabled(checked and self.convert_combo.isEnabled()))
         conv_row1.addWidget(self.bitrate_combo)
         conv_row1.addStretch()
         convert_layout.addLayout(conv_row1)
         download_layout.addWidget(convert_group)
+
+        self.convert_combo.currentIndexChanged.connect(self._update_bitrate_options)
+        self.convert_check.toggled.connect(self._update_bitrate_options)
+        self._update_bitrate_options()
 
         label = QLabel("Made By cYy")
         label.setAlignment(Qt.AlignRight)
@@ -476,12 +492,49 @@ class SettingsDialog(QDialog):
         else:
             self.format_custom_edit.hide()
 
+    def _update_bitrate_options(self):
+        """根据当前选择的转换格式，动态更新比特率下拉列表"""
+        fmt = self.convert_combo.currentText()
+        checked = self.convert_check.isChecked()
+
+        # FLAC 无损格式，禁用比特率选项
+        if fmt == "flac":
+            self.bitrate_combo.setEnabled(False)
+            self.bitrate_combo.clear()
+            self.bitrate_combo.addItem("无损（无需比特率）")
+            return
+
+        # 其他格式根据 enable 状态
+        self.bitrate_combo.setEnabled(checked)
+
+        # 根据格式提供合适的比特率选项
+        if fmt == "mp3":
+            options = ["128k", "192k", "256k", "320k"]
+        elif fmt == "aac":
+            options = ["128k", "192k", "256k"]          # AAC 常用范围
+        elif fmt == "ogg":
+            options = ["128k", "192k", "256k", "320k"]  # 或可改为质量等级，这里保留比特率
+        else:
+            options = ["128k", "192k", "256k", "320k"]
+
+        current = self.bitrate_combo.currentText()
+        self.bitrate_combo.clear()
+        self.bitrate_combo.addItems(options)
+        if current in options:
+            self.bitrate_combo.setCurrentText(current)
+        else:
+            self.bitrate_combo.setCurrentIndex(0)
+
     def get_settings(self):
         selected_sources = [cb.text() for cb in self.source_checkboxes if cb.isChecked()]
-        # ----- 新增：获取主题 -----
         theme_idx = self.theme_combo.currentIndex()
         theme_key = ['light', 'dark'][theme_idx] if theme_idx < 2 else 'light'
-        # -------------------------
+
+        # 获取比特率，若格式为 flac 则置空
+        convert_bitrate = self.bitrate_combo.currentText()
+        if self.convert_combo.currentText() == "flac":
+            convert_bitrate = ""
+
         return {
             'sources': selected_sources,
             'limit': self.spin_limit.value(),
@@ -493,7 +546,9 @@ class SettingsDialog(QDialog):
             'download_cover': self.check_cover.isChecked(),
             'convert_enabled': self.convert_check.isChecked(),
             'convert_format': self.convert_combo.currentText() if self.convert_check.isChecked() else '',
-            'convert_bitrate': self.bitrate_combo.currentText() if self.convert_check.isChecked() else '',
+            'convert_bitrate': convert_bitrate,
             'theme': theme_key,
             'background_opacity': self.opacity_slider.value() / 100.0,
+            'embed_lyrics': self.check_embed_lyrics.isChecked(),
+            'embed_cover': self.check_embed_cover.isChecked(),
         }

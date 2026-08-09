@@ -262,6 +262,43 @@ except ImportError:
         illegal_chars = r'[\\/:*?"<>|]'
         return re.sub(illegal_chars, '_', filename)
 
+def embed_lyrics(audio_path: str, lyric_text: str) -> bool:
+    """将歌词嵌入音频元数据，支持 MP3, M4A, FLAC, OGG"""
+    try:
+        ext = os.path.splitext(audio_path)[1].lower()
+        if ext == '.mp3':
+            from mutagen.id3 import ID3, USLT
+            try:
+                audio = ID3(audio_path)
+            except Exception:
+                audio = ID3()
+            audio.delall('USLT')
+            audio.add(USLT(encoding=3, lang='eng', desc='', text=lyric_text))
+            audio.save(audio_path)
+        elif ext in ['.m4a', '.m4b']:
+            from mutagen.mp4 import MP4
+            audio = MP4(audio_path)
+            audio['©lyr'] = lyric_text
+            audio.save()
+        elif ext == '.flac':
+            from mutagen.flac import FLAC
+            audio = FLAC(audio_path)
+            audio['LYRICS'] = lyric_text
+            audio.save()
+        elif ext == '.ogg':
+            from mutagen.oggvorbis import OggVorbis
+            audio = OggVorbis(audio_path)
+            audio['LYRICS'] = lyric_text
+            audio.save()
+        else:
+            logger.warning(f"不支持嵌入歌词到 {ext} 格式")
+            return False
+        logger.info(f"歌词已嵌入: {audio_path}")
+        return True
+    except Exception as e:
+        logger.error(f"嵌入歌词失败: {e}", exc_info=True)
+        return False
+
 # ==================== 依赖检查工具 ====================
 def check_vlc() -> bool:
     """检查 VLC 是否可用（尝试导入 vlc 并创建实例）"""
@@ -707,6 +744,19 @@ def get_global_stylesheet(theme_name: str = 'light', bg_opacity: float = 0.8) ->
         color: {text};
         background: transparent;
     }}
+    AudioVisualizer #titleMaxButton,
+    AudioVisualizer #titleCloseButton {{
+        background: transparent;
+        border: none;
+        color: {text};
+    }}
+    AudioVisualizer #titleMaxButton:hover {{
+        background: {hover};
+    }}
+    AudioVisualizer #titleCloseButton:hover {{
+        background: #E74C3C;
+        color: white;
+    }}
     """
     return template.format(**colors_with_alpha)
 
@@ -784,8 +834,11 @@ def convert_audio(input_path: str, output_format: str, bitrate: str = None) -> s
         output_path = f"{base}_{counter}.{output_format}"
     
     cmd = ['ffmpeg', '-y', '-i', input_path]
-    if bitrate:
+    # 只有非 FLAC 格式且 bitrate 有值才添加 -b:a
+    if output_format != 'flac' and bitrate:
         cmd.extend(['-b:a', bitrate])
+
+    # 编码器选择
     if output_format == 'mp3':
         cmd.extend(['-acodec', 'libmp3lame'])
     elif output_format == 'aac':

@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Callable, Tuple
 import requests
 from PyQt5.QtCore import QThread, pyqtSignal, QRunnable, QObject, QThreadPool, pyqtSlot
 
-from utils import logger, _download_image_data, download_cover_image, get_cover_url, sanitize_filepath, build_filename, convert_audio
+from utils import logger, _download_image_data, download_cover_image, get_cover_url, sanitize_filepath, build_filename, convert_audio, embed_lyrics
 from constants import DEFAULT_SAVE_DIR
 
 # ==================== 封面下载任务 ====================
@@ -178,7 +178,8 @@ class DownloadThread(QThread):
     def __init__(self, song_info: Dict, get_request_kwargs: Callable[[str], Dict],
                  save_dir: str, filename_format: str,
                  download_lyric: bool, download_cover: bool,
-                 convert_format: str = '', convert_bitrate: str = ''):
+                 convert_format: str = '', convert_bitrate: str = '',
+                 embed_lyrics: bool = False, embed_cover: bool = False):
         super().__init__()
         self.song_info = song_info
         self.get_request_kwargs = get_request_kwargs
@@ -188,6 +189,8 @@ class DownloadThread(QThread):
         self.download_cover = download_cover
         self.convert_format = convert_format
         self.convert_bitrate = convert_bitrate
+        self.embed_lyrics = embed_lyrics
+        self.embed_cover = embed_cover
         self._stop = False
 
     def stop(self):
@@ -234,30 +237,49 @@ class DownloadThread(QThread):
             if self.download_lyric and not self._stop:
                 lyric_text = self.song_info.get('lyric') or self.song_info.get('lyrics', '')
                 if lyric_text:
-                    lyric_path = os.path.join(work_dir, f"{base_name}.lrc")
-                    lyric_path = self._get_unique_path(lyric_path)
-                    try:
-                        with open(lyric_path, 'w', encoding='utf-8-sig') as f:
-                            f.write(lyric_text)
-                    except Exception as e:
-                        logger.error(f"歌词保存失败: {e}", exc_info=True)
-                        self.error.emit(f"歌词保存失败: {str(e)}")
+                    if self.embed_lyrics:
+                        # 嵌入歌词，不保存独立 .lrc
+                        success = embed_lyrics(audio_file_path, lyric_text)
+                        if not success:
+                            # 嵌入失败，降级保存 .lrc
+                            lyric_path = os.path.join(work_dir, f"{base_name}.lrc")
+                            lyric_path = self._get_unique_path(lyric_path)
+                            try:
+                                with open(lyric_path, 'w', encoding='utf-8-sig') as f:
+                                    f.write(lyric_text)
+                                logger.warning("歌词嵌入失败，已保存为独立 .lrc 文件")
+                            except Exception as e:
+                                logger.error(f"歌词保存失败: {e}", exc_info=True)
+                                self.error.emit(f"歌词保存失败: {str(e)}")
+                    else:
+                        # 不嵌入，仅保存 .lrc
+                        lyric_path = os.path.join(work_dir, f"{base_name}.lrc")
+                        lyric_path = self._get_unique_path(lyric_path)
+                        try:
+                            with open(lyric_path, 'w', encoding='utf-8-sig') as f:
+                                f.write(lyric_text)
+                        except Exception as e:
+                            logger.error(f"歌词保存失败: {e}", exc_info=True)
+                            self.error.emit(f"歌词保存失败: {str(e)}")
 
             if self.download_cover and not self._stop:
                 cover_url = get_cover_url(self.song_info)
                 if cover_url:
                     img_data, cover_ext = download_cover_image(cover_url, request_kwargs)
                     if img_data:
-                        cover_path = os.path.join(work_dir, f"{base_name}_cover.{cover_ext}")
-                        cover_path = self._get_unique_path(cover_path)
-                        try:
-                            with open(cover_path, 'wb') as f:
-                                f.write(img_data)
+                        if self.embed_cover:
+                            # 嵌入封面，不保存独立文件
                             self._embed_cover(audio_file_path, img_data, cover_ext)
-                        except Exception as e:
-                            logger.error(f"保存/嵌入封面失败: {e}", exc_info=True)
-                            self.error.emit(f"保存/嵌入封面失败: {str(e)}")
-
+                        else:
+                            # 不嵌入，仅保存独立封面文件
+                            cover_path = os.path.join(work_dir, f"{base_name}_cover.{cover_ext}")
+                            cover_path = self._get_unique_path(cover_path)
+                            try:
+                                with open(cover_path, 'wb') as f:
+                                    f.write(img_data)
+                            except Exception as e:
+                                logger.error(f"保存封面失败: {e}", exc_info=True)
+                                self.error.emit(f"保存封面失败: {str(e)}")
             if not self._stop:
                 self.finished.emit(song_name, singers, audio_file_path)
 

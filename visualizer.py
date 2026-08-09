@@ -165,9 +165,12 @@ class AudioVisualizer(QMainWindow):
             btn = QPushButton(symbol)
             btn.setFixedSize(36, 32)
             btn.clicked.connect(slot)
-            title_layout.addWidget(btn)
             if symbol == "□":
                 self.max_btn = btn
+                btn.setObjectName("titleMaxButton")
+            else:
+                btn.setObjectName("titleCloseButton")
+            title_layout.addWidget(btn)
 
         main_layout.addWidget(title_bar)
 
@@ -279,7 +282,10 @@ class AudioVisualizer(QMainWindow):
         right_layout.addWidget(self.ring_canvas, 1)
 
         splitter.addWidget(right_widget)
-        splitter.setSizes([550, 400])
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        right_widget.setMinimumWidth(0)
+        splitter.setSizes([splitter.width(), 0])
 
         # 底部控制栏
         control = QWidget()
