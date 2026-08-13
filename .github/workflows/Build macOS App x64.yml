@@ -62,6 +62,7 @@ jobs:
 
     - name: Create DMG installer
       env:
+        ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
         APP_NAME: cYy-Music-Client_macos-x64
       run: |
         mkdir -p dmg_staging
