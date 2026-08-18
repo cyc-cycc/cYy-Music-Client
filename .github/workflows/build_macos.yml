@@ -19,16 +19,7 @@ jobs:
     - name: Install VLC, FFmpeg and PortAudio
       run: |
         brew untap aws/tap || true
-        brew install --cask vlc
         brew install ffmpeg portaudio
-
-        VLC_LIB="/Applications/VLC.app/Contents/MacOS/lib/libvlc.dylib"
-        if [ -f "$VLC_LIB" ]; then
-          echo "VLC installed successfully: $VLC_LIB"
-        else
-          echo "VLC library not found at expected location!"
-          exit 1
-        fi
 
         FFMPEG_BIN="$(brew --prefix ffmpeg)/bin/ffmpeg"
         if [ -f "$FFMPEG_BIN" ]; then
