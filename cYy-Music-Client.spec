@@ -70,7 +70,6 @@ a = Analysis(
         'requests',
         'filetype',
         'musicdl',
-        'vlc',            # 保留，因为代码中会导入，但运行时依赖系统 VLC
         'PyQt5.sip',
     ],
     hookspath=[],
@@ -158,12 +157,12 @@ app = BUNDLE(
     icon=ICON_PATH if os.path.exists(ICON_PATH) else None,
     bundle_identifier='com.cYy.musicdlgui',
     info_plist={
-        'CFBundleShortVersionString': '4.6.0',
-        'CFBundleVersion': '4.6.0',
+        'CFBundleShortVersionString': '5.0.0',
+        'CFBundleVersion': '5.0.0',
         'CFBundleName': 'cYy Music Client',
         'CFBundleDisplayName': 'cYy Music Client',
         'NSHighResolutionCapable': True,
-        'LSMinimumSystemVersion': '10.13',
+        'LSMinimumSystemVersion': '10.15',
         'NSMicrophoneUsageDescription': '此应用需要访问音频设备以播放和可视化音乐文件',
     },
 )
