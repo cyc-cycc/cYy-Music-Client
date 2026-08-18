@@ -6,11 +6,12 @@ import time
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Callable, Tuple
+import tempfile
 
 import requests
 from PyQt5.QtCore import QThread, pyqtSignal, QRunnable, QObject, QThreadPool, pyqtSlot
 
-from utils import logger, _download_image_data, download_cover_image, get_cover_url, sanitize_filepath, build_filename, convert_audio, embed_lyrics
+from utils import logger, _download_image_data, download_cover_image, get_cover_url, sanitize_filepath, build_filename, convert_audio, embed_lyrics, atomic_write, retry
 from constants import DEFAULT_SAVE_DIR
 
 # ==================== 封面下载任务 ====================
@@ -37,10 +38,10 @@ class CoverRunnable(QRunnable):
 
 # ==================== 搜索线程 ====================
 class SearchThread(QThread):
-    result_ready = pyqtSignal(int, str, dict)      # task_id, source, song_info
-    source_done = pyqtSignal(int, str, int)        # task_id, source, count
-    source_error = pyqtSignal(int, str)            # task_id, error_msg
-    all_done = pyqtSignal(int)                     # task_id
+    result_ready = pyqtSignal(int, str, dict)
+    source_done = pyqtSignal(int, str, int)
+    source_error = pyqtSignal(int, str)
+    all_done = pyqtSignal(int)
 
     def __init__(self, music_client, keyword: str, task_id: int):
         super().__init__()
@@ -58,7 +59,7 @@ class SearchThread(QThread):
             self.all_done.emit(self.task_id)
             return
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(sources)) as executor:
+        with ThreadPoolExecutor(max_workers=len(sources)) as executor:
             futures = {}
             for src in sources:
                 fut = executor.submit(self._search_source, src)
@@ -77,7 +78,7 @@ class SearchThread(QThread):
     def _search_source(self, source):
         try:
             client = self.music_client.music_clients[source]
-            results = client.search(keyword=self.keyword, num_threadings=1)
+            results = client.search(keyword=self.keyword, num_threadings=3)
             if self._stop:
                 return 0
             count = 0
@@ -102,7 +103,7 @@ class SearchThread(QThread):
 # ==================== 歌单解析线程 ====================
 class PlaylistParseThread(QThread):
     parse_started = pyqtSignal(int)
-    parse_finished = pyqtSignal(int, list, str)     # task_id, song_infos, source_display
+    parse_finished = pyqtSignal(int, list, str)
     parse_error = pyqtSignal(int, str)
 
     def __init__(self, music_client, playlist_url: str, source_internal: str, source_display: str, task_id: int):
@@ -164,22 +165,21 @@ class PlaylistParseThread(QThread):
                     temp_client.close()
             except Exception:
                 pass
-            try:
-                del temp_client
-            except Exception:
-                pass
 
-# ==================== 下载线程（增加格式转换） ====================
+# ==================== 下载线程（增强：临时文件+重试+原子写入） ====================
 class DownloadThread(QThread):
     progress = pyqtSignal(int)
-    finished = pyqtSignal(str, str, str)   # song_name, singers, file_path
+    finished = pyqtSignal(str, str, str)
     error = pyqtSignal(str)
 
     def __init__(self, song_info: Dict, get_request_kwargs: Callable[[str], Dict],
                  save_dir: str, filename_format: str,
                  download_lyric: bool, download_cover: bool,
                  convert_format: str = '', convert_bitrate: str = '',
-                 embed_lyrics: bool = False, embed_cover: bool = False):
+                 embed_lyrics: bool = False, delete_lyrics: bool = False,
+                 embed_cover: bool = False, delete_cover: bool = False,
+                 group_by: str = '无分组',
+                 session: Optional[requests.Session] = None):
         super().__init__()
         self.song_info = song_info
         self.get_request_kwargs = get_request_kwargs
@@ -190,28 +190,94 @@ class DownloadThread(QThread):
         self.convert_format = convert_format
         self.convert_bitrate = convert_bitrate
         self.embed_lyrics = embed_lyrics
+        self.delete_lyrics = delete_lyrics
         self.embed_cover = embed_cover
+        self.delete_cover = delete_cover
+        self.group_by = group_by
         self._stop = False
+        self._session = session
 
     def stop(self):
         self._stop = True
+
+    @retry(max_attempts=3, delay=1, backoff=2, exceptions=(requests.RequestException, IOError))
+    def _download_file(self, url: str, target_path: str, request_kwargs: Dict):
+        """使用临时文件下载，成功后原子替换"""
+        temp_dir = os.path.dirname(target_path) or '.'
+        with tempfile.NamedTemporaryFile(dir=temp_dir, delete=False, suffix='.tmp') as tmp:
+            tmp_path = tmp.name
+        try:
+            session = self._session or requests.Session()
+            session.verify = request_kwargs.get('verify', True)
+            headers = request_kwargs.get('headers') or {}
+            session.headers.update(headers)
+            cookies = request_kwargs.get('cookies') or {}
+            if cookies:
+                session.cookies.update(cookies)
+
+            # 构造请求参数，避免重复传递 timeout
+            req_kwargs = {}
+            for k in ('proxies', 'verify'):
+                if k in request_kwargs:
+                    req_kwargs[k] = request_kwargs[k]
+            req_kwargs['stream'] = True
+            req_kwargs['timeout'] = request_kwargs.get('timeout', 30)
+
+            with session.get(url, **req_kwargs) as resp:
+                if resp.status_code != 200:
+                    raise Exception(f"HTTP {resp.status_code}")
+                total = int(resp.headers.get('content-length', 0)) or None
+                downloaded = 0
+                last_emit = 0.0
+                with open(tmp_path, 'wb') as f:
+                    for chunk in resp.iter_content(chunk_size=32*1024):
+                        if self._stop:
+                            break
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            now = time.time()
+                            if total:
+                                percent = int(downloaded / total * 100)
+                            else:
+                                percent = min(99, int(downloaded / (1024 * 50)))  # 估算
+                            if now - last_emit > 0.25 or percent == 100:
+                                self.progress.emit(percent)
+                                last_emit = now
+                if self._stop:
+                    os.unlink(tmp_path)
+                    raise Exception("下载已取消")
+                self.progress.emit(100)
+                # 原子替换
+                os.replace(tmp_path, target_path)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
+        finally:
+            if self._session is None and 'session' in locals():
+                try:
+                    session.close()
+                except Exception:
+                    pass
 
     def run(self):
         try:
             source = self.song_info.get('source', '')
             url = self.song_info['download_url']
-            work_dir = self.save_dir
+
+            from utils import get_group_subdir
+            sub_dir = get_group_subdir(self.song_info, self.group_by)
+            target_dir = os.path.join(self.save_dir, sub_dir) if sub_dir else self.save_dir
+            os.makedirs(target_dir, exist_ok=True)
+
             song_name = self.song_info.get('song_name', '')
             singers = self.song_info.get('singers', '')
             ext = self.song_info.get('ext', 'mp3') or 'mp3'
-
             base_name = self._build_base_name()
             base_name = sanitize_filepath(base_name)
-            if not os.path.exists(work_dir):
-                os.makedirs(work_dir, exist_ok=True)
 
-            audio_file_path = os.path.join(work_dir, f"{base_name}.{ext}")
-            audio_file_path = self._get_unique_path(audio_file_path)
+            audio_file_path = os.path.join(target_dir, f"{base_name}.{ext}")
 
             request_kwargs = self.get_request_kwargs(source)
             if 'cookies' not in request_kwargs and self.song_info.get('cookies'):
@@ -219,12 +285,10 @@ class DownloadThread(QThread):
 
             self._download_file(url, audio_file_path, request_kwargs)
 
-            # ===== 格式转换（新增） =====
+            # 格式转换
             if self.convert_format and not self._stop:
                 converted = convert_audio(audio_file_path, self.convert_format, self.convert_bitrate)
                 if converted:
-                    # 删除原文件（如果需要）
-                    # 注意：如果转换输出同名但不同扩展名，则保留两者；这里我们替换为转换后的文件
                     if converted != audio_file_path:
                         try:
                             os.remove(audio_file_path)
@@ -234,52 +298,45 @@ class DownloadThread(QThread):
                 else:
                     self.error.emit("格式转换失败，保留原文件")
 
+            # 歌词
             if self.download_lyric and not self._stop:
                 lyric_text = self.song_info.get('lyric') or self.song_info.get('lyrics', '')
                 if lyric_text:
-                    if self.embed_lyrics:
-                        # 嵌入歌词，不保存独立 .lrc
-                        success = embed_lyrics(audio_file_path, lyric_text)
-                        if not success:
-                            # 嵌入失败，降级保存 .lrc
-                            lyric_path = os.path.join(work_dir, f"{base_name}.lrc")
-                            lyric_path = self._get_unique_path(lyric_path)
-                            try:
-                                with open(lyric_path, 'w', encoding='utf-8-sig') as f:
-                                    f.write(lyric_text)
-                                logger.warning("歌词嵌入失败，已保存为独立 .lrc 文件")
-                            except Exception as e:
-                                logger.error(f"歌词保存失败: {e}", exc_info=True)
-                                self.error.emit(f"歌词保存失败: {str(e)}")
+                    lyric_path = os.path.join(target_dir, f"{base_name}.lrc")
+                    try:
+                        atomic_write(lyric_text.encode('utf-8-sig'), lyric_path)
+                    except Exception as e:
+                        logger.error(f"歌词保存失败: {e}", exc_info=True)
+                        self.error.emit(f"歌词保存失败: {str(e)}")
                     else:
-                        # 不嵌入，仅保存 .lrc
-                        lyric_path = os.path.join(work_dir, f"{base_name}.lrc")
-                        lyric_path = self._get_unique_path(lyric_path)
-                        try:
-                            with open(lyric_path, 'w', encoding='utf-8-sig') as f:
-                                f.write(lyric_text)
-                        except Exception as e:
-                            logger.error(f"歌词保存失败: {e}", exc_info=True)
-                            self.error.emit(f"歌词保存失败: {str(e)}")
+                        if self.embed_lyrics:
+                            if embed_lyrics(audio_file_path, lyric_text) and self.delete_lyrics:
+                                try:
+                                    os.remove(lyric_path)
+                                except Exception:
+                                    pass
 
+            # 封面
             if self.download_cover and not self._stop:
                 cover_url = get_cover_url(self.song_info)
                 if cover_url:
                     img_data, cover_ext = download_cover_image(cover_url, request_kwargs)
                     if img_data:
-                        if self.embed_cover:
-                            # 嵌入封面，不保存独立文件
-                            self._embed_cover(audio_file_path, img_data, cover_ext)
+                        cover_path = os.path.join(target_dir, f"{base_name}_cover.{cover_ext}")
+                        try:
+                            atomic_write(img_data, cover_path)
+                        except Exception as e:
+                            logger.error(f"保存封面失败: {e}", exc_info=True)
+                            self.error.emit(f"保存封面失败: {str(e)}")
                         else:
-                            # 不嵌入，仅保存独立封面文件
-                            cover_path = os.path.join(work_dir, f"{base_name}_cover.{cover_ext}")
-                            cover_path = self._get_unique_path(cover_path)
-                            try:
-                                with open(cover_path, 'wb') as f:
-                                    f.write(img_data)
-                            except Exception as e:
-                                logger.error(f"保存封面失败: {e}", exc_info=True)
-                                self.error.emit(f"保存封面失败: {str(e)}")
+                            if self.embed_cover:
+                                try:
+                                    self._embed_cover(audio_file_path, img_data, cover_ext)
+                                    if self.delete_cover and os.path.exists(cover_path):
+                                        os.remove(cover_path)
+                                except Exception as e:
+                                    logger.error(f"嵌入封面失败: {e}", exc_info=True)
+
             if not self._stop:
                 self.finished.emit(song_name, singers, audio_file_path)
 
@@ -290,98 +347,6 @@ class DownloadThread(QThread):
     def _build_base_name(self) -> str:
         return build_filename(self.song_info, self.filename_format)
 
-    def _get_unique_path(self, path: str) -> str:
-        if not os.path.exists(path):
-            return path
-        base, ext = os.path.splitext(path)
-        counter = 1
-        while True:
-            new_path = f"{base}({counter}){ext}"
-            if not os.path.exists(new_path):
-                return new_path
-            counter += 1
-
-    def _download_file(self, url: str, file_path: str, request_kwargs: Dict):
-        f = None
-        session = None
-        try:
-            session = requests.Session()
-            session.verify = request_kwargs.get('verify', True)
-            headers = request_kwargs.get('headers') or {}
-            session.headers.update(headers)
-            cookies = request_kwargs.get('cookies') or {}
-            if cookies:
-                session.cookies.update(cookies)
-
-            kw = {}
-            kw.update({k: v for k, v in request_kwargs.items() if k in ('timeout', 'proxies', 'verify')})
-            kw['stream'] = True
-            timeout = kw.get('timeout', 30)
-
-            with session.get(url, timeout=timeout, stream=True, **({} if 'proxies' not in kw else {'proxies': kw.get('proxies')})) as resp:
-                if resp.status_code != 200:
-                    raise Exception(f"HTTP {resp.status_code}")
-                total_hdr = resp.headers.get('content-length')
-                total = int(total_hdr) if total_hdr and total_hdr.isdigit() else None
-                downloaded = 0
-                f = open(file_path, 'wb')
-                last_emit_time = 0.0
-                chunk_size = 32 * 1024
-                for chunk in resp.iter_content(chunk_size=chunk_size):
-                    if self._stop:
-                        break
-                    if not chunk:
-                        continue
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    now = time.time()
-                    if total:
-                        percent = int(downloaded / total * 100)
-                    else:
-                        # 当 total 不可用时使用较保守的估算（避免把字节数直接当百分比）
-                        percent = min(99, int(downloaded / (1024 * 50)))  # 每 50KB 视作 1%
-                    if (now - last_emit_time) > 0.25 or percent == 100:
-                        try:
-                            self.progress.emit(percent)
-                        except Exception:
-                            pass
-                        last_emit_time = now
-                if self._stop:
-                    try:
-                        f.close()
-                    except Exception:
-                        pass
-                    if os.path.exists(file_path):
-                        try:
-                            os.remove(file_path)
-                        except Exception:
-                            logger.error(f"清理临时文件失败: {file_path}")
-                    raise Exception("下载已取消")
-                self.progress.emit(100)
-        except Exception as e:
-            if f:
-                try:
-                    f.close()
-                except Exception:
-                    pass
-            if os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                except OSError:
-                    logger.error(f"清理临时文件失败: {file_path}")
-            raise e
-        finally:
-            if session:
-                try:
-                    session.close()
-                except Exception:
-                    pass
-            if f and not f.closed:
-                try:
-                    f.close()
-                except Exception:
-                    pass
-
     def _embed_cover(self, audio_path: str, img_data: bytes, cover_ext: str):
         try:
             ext_lower = os.path.splitext(audio_path)[1].lower()
@@ -391,22 +356,13 @@ class DownloadThread(QThread):
                     audio = ID3(audio_path)
                 except Exception:
                     audio = ID3()
-                audio.add(APIC(
-                    encoding=3,
-                    mime=f'image/{cover_ext}',
-                    type=3,
-                    desc='Cover',
-                    data=img_data
-                ))
+                audio.add(APIC(encoding=3, mime=f'image/{cover_ext}', type=3, desc='Cover', data=img_data))
                 audio.save(audio_path)
             elif ext_lower in ['.m4a', '.m4b']:
                 from mutagen.mp4 import MP4, MP4Cover
                 audio = MP4(audio_path)
-                if cover_ext.lower() == 'png':
-                    cover_format = MP4Cover.FORMAT_PNG
-                else:
-                    cover_format = MP4Cover.FORMAT_JPEG
-                audio['covr'] = [MP4Cover(img_data, imageformat=cover_format)]
+                fmt = MP4Cover.FORMAT_PNG if cover_ext.lower() == 'png' else MP4Cover.FORMAT_JPEG
+                audio['covr'] = [MP4Cover(img_data, imageformat=fmt)]
                 audio.save()
             elif ext_lower == '.flac':
                 from mutagen.flac import FLAC, Picture
@@ -419,22 +375,14 @@ class DownloadThread(QThread):
                 audio.save()
         except Exception as e:
             logger.error(f"嵌入封面失败: {e}", exc_info=True)
-            try:
-                self.error.emit(f"嵌入封面失败: {str(e)}")
-            except Exception:
-                pass
-# ==================== 链接刷新线程（异步） ====================
+            self.error.emit(f"嵌入封面失败: {str(e)}")
+
+# ==================== 链接刷新线程 ====================
 class RefreshThread(QThread):
-    """异步刷新歌曲下载链接，返回刷新后的 song_info 列表"""
-    refresh_finished = pyqtSignal(list, object)  # (refreshed_list, user_data)
-    progress = pyqtSignal(int, int)              # (current, total) 新增
+    refresh_finished = pyqtSignal(list, object)
+    progress = pyqtSignal(int, int)
 
     def __init__(self, song_infos: List[Dict], refresh_func, user_data=None):
-        """
-        :param song_infos: 需要刷新的歌曲信息列表（每个字典至少包含 identifier, source, singers, song_name）
-        :param refresh_func: 实际执行刷新的函数（即原有的 refresh_song_url）
-        :param user_data: 透传数据，便于回调识别场景
-        """
         super().__init__()
         self.song_infos = song_infos
         self.refresh_func = refresh_func
@@ -453,6 +401,5 @@ class RefreshThread(QThread):
             new_info = self.refresh_func(info)
             if new_info:
                 refreshed.append(new_info)
-            # 发射进度信号
             self.progress.emit(idx + 1, total)
         self.refresh_finished.emit(refreshed, self.user_data)

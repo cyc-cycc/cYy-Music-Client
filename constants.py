@@ -39,7 +39,6 @@ SOURCE_INTERNAL = {
 }
 
 FILENAME_FORMATS = ['歌曲名', '歌手-歌曲名', '歌曲名-歌手', '自定义']
-
 PLAYLIST_SOURCE_MAP = {
     '网易云音乐': 'NeteaseMusicClient',
     'QQ音乐': 'QQMusicClient',
@@ -47,6 +46,9 @@ PLAYLIST_SOURCE_MAP = {
     '酷狗音乐': 'KugouMusicClient',
     '5sing音乐': 'FiveSingMusicClient',
 }
+
+# ==================== 下载分组方式 ====================
+GROUP_BY_OPTIONS = ['无分组', '按歌手', '按专辑', '按歌手-专辑']
 
 # ==================== 播放器枚举 ====================
 class PlayerState(IntEnum):
@@ -69,6 +71,7 @@ class PlayMode(IntEnum):
     SingleStop = 1
     ListRepeat = 2
     ListStop = 3
+
 # ==================== 主题定义 ====================
 THEMES = {
     'light': {
@@ -77,10 +80,10 @@ THEMES = {
         'primary_light': '#5DADE2',
         'primary_dark': '#357ABD',
         'background': '#F5F7FA',
-        'content_rgb': '200,225,245',   # 新增：半透明内容背景
+        'content_rgb': '200,225,245',
         'surface': '#FFFFFF',
         'text': '#2C3E50',
-        'title_text': '#2C3E50',                    # 新增：标题栏文字颜色
+        'title_text': '#2C3E50',
         'text_secondary': '#5D6D7E',
         'border': '#BDC3C7',
         'title_bar': '#E8F0FE',
@@ -96,10 +99,10 @@ THEMES = {
         'primary_light': '#5DADE2',
         'primary_dark': '#357ABD',
         'background': '#2C3E50',
-        'content_rgb': '44,62,80',      # 新增：半透明暗色背景
+        'content_rgb': '44,62,80',
         'surface': '#34495E',
         'text': '#ECF0F1',
-        'title_text': '#ECF0F1',                    # 新增：标题栏文字颜色
+        'title_text': '#ECF0F1',
         'text_secondary': '#BDC3C7',
         'border': '#5D6D7E',
         'title_bar': '#34495E',
@@ -110,3 +113,9 @@ THEMES = {
         'surface_rgb': '52,73,94',
     },
 }
+
+# ==================== 加密常量 ====================
+ENCRYPTION_PASSWORD = "cYy4_Music3_Client0_playlist_PASSWORD"   # 可由外部覆盖
+
+# ==================== 刷新搜索大小 ====================
+REFRESH_SEARCH_SIZE = 2
