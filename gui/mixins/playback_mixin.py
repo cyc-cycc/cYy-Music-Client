@@ -85,7 +85,8 @@ class PlaybackMixin(BaseMixin):
             if total > 0:
                 self.label_time.setText(f"{self._format_time(pos)} / {self._format_time(total)}")
             else:
-                self.label_time.setText(f"{self._format_time(pos)} / 00:00")
+                # 时长未知（未提供元数据）：只显示已播放时间
+                self.label_time.setText(f"{self._format_time(pos)} / --:--")
 
     def update_duration(self, duration):
         self.slider_position.setRange(0, duration)

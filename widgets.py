@@ -57,9 +57,10 @@ class SpectrumWidget(QWidget):
         super().__init__(parent)
         self.setObjectName("miniSpectrum")
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setFixedHeight(16)
+        self.setFixedHeight(25)
         self._bars = bars
         self._player = None
+        self._last_frame = None  # 上次已分析的帧引用（暂停/停止时跳过重复计算）
         self._smooth = np.zeros(bars, dtype=np.float32)
         self._win = np.hanning(1024).astype(np.float32)  # 预计算窗函数（44.1kHz）
         self._peak = 1.0
@@ -78,6 +79,9 @@ class SpectrumWidget(QWidget):
         if player is None:
             return
         pcm = player.pcm_frame  # 引擎侧引用赋值，读取原子
+        if pcm is self._last_frame:
+            return  # 同一帧（暂停/停止/无新音频）无需重复计算
+        self._last_frame = pcm
         n = len(pcm)
         if n < 256:
             return
@@ -121,7 +125,7 @@ class SpectrumWidget(QWidget):
             t = i / max(1, n - 1)
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(int(74 + 56 * t), 144, int(217 - 60 * t), 220))
-            p.drawRoundedRect(QRectF(x, y, bar_w, bh), bar_w / 2, bar_w / 2)
+            p.drawRoundedRect(QRectF(x, y, bar_w, bh), bar_w / 4, bar_w / 2)
 
 # ==================== 歌曲卡片 ====================
 class SongCard(QFrame):

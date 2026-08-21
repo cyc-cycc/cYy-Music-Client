@@ -129,7 +129,7 @@ class StreamPlayer(QObject):
         self._ended = False
         self._failed = False
         with self.pcm_lock:
-            self.pcm_frame.fill(0)
+            self.pcm_frame = np.zeros(_FRAME, dtype=np.float32)  # 新引用，频谱侧可感知停止
         self.positionChanged.emit(0)
         self.stateChanged.emit(PlayerState.StoppedState)
 
@@ -161,7 +161,11 @@ class StreamPlayer(QObject):
         self.durationChanged.emit(0)
 
     def position(self) -> int:
-        return int(self._playback_samples / _SAMPLE_RATE * 1000)
+        ms = int(self._playback_samples / _SAMPLE_RATE * 1000)
+        # 已知时长时封顶，避免结束信号延迟时进度/时间无限增长
+        if self._duration_ms > 0 and ms > self._duration_ms:
+            ms = self._duration_ms
+        return ms
 
     def duration(self) -> int:
         return self._duration_ms
@@ -289,19 +293,27 @@ class StreamPlayer(QObject):
 
         needed = frames * _CHANNELS * 2  # 双声道 s16le 字节数
         buf = bytearray()
+        got_full = False
         while len(buf) < needed:
             try:
                 chunk = q.get(timeout=0.01)
             except Empty:
                 break
-            if chunk is None:  # 播放结束
+            if chunk is None:  # 解码结束
                 outdata.fill(0)
                 self._ended = True
                 return
             buf.extend(chunk)
-
-        if len(buf) < needed:
-            buf.extend(b'\x00' * (needed - len(buf)))
+            if len(buf) >= needed:
+                got_full = True
+                break
+        if not got_full:
+            # 队列暂时为空：解码进程已退出则视为结束；否则静音等待（不推进进度，避免歌词超前）
+            proc = self._proc
+            if proc is not None and proc.poll() is not None:
+                self._ended = True
+            outdata.fill(0)
+            return
 
         pcm = np.frombuffer(buf[:needed], dtype=np.int16).astype(np.float32) / 32768.0
         pcm = pcm.reshape(-1, _CHANNELS) * (self._volume / 100.0)
@@ -311,6 +323,7 @@ class StreamPlayer(QObject):
         if len(pcm) < frames:
             outdata[len(pcm):] = 0
 
+        # 仅在取到真实数据时推进进度：进度/歌词与实际音频内容同步
         if not self._paused:
             self._playback_samples += frames
 
